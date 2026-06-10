@@ -1,0 +1,6 @@
+{
+  "name": "ZimLite",
+  "description": "Минималистичный офлайн ридер ZIM архивов Википедии и Викицитатника с поддержкой тем, поиска и закладок.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
