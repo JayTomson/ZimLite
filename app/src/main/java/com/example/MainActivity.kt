@@ -44,9 +44,12 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -789,6 +792,66 @@ fun SearchScreen(viewModel: MainViewModel) {
 }
 
 @Composable
+fun HighlightedText(
+    text: String,
+    query: String,
+    modifier: Modifier = Modifier,
+    highlightColor: Color = MaterialTheme.colorScheme.primary,
+    baseColor: Color = MaterialTheme.colorScheme.onSurfaceVariant,
+    fontSize: TextUnit = 13.sp,
+    maxLines: Int = Int.MAX_VALUE,
+    fontWeight: FontWeight = FontWeight.Normal,
+    lineHeight: TextUnit = TextUnit.Unspecified
+) {
+    val tokens = remember(query) { query.split("\\s+".toRegex()).filter { it.length >= 2 } }
+    if (tokens.isEmpty()) {
+        Text(
+            text = text,
+            modifier = modifier,
+            fontSize = fontSize,
+            color = baseColor,
+            maxLines = maxLines,
+            overflow = TextOverflow.Ellipsis,
+            fontWeight = fontWeight,
+            lineHeight = lineHeight
+        )
+        return
+    }
+
+    val annotatedString = remember(text, query) {
+        buildAnnotatedString {
+            append(text)
+            tokens.forEach { token ->
+                var startIndex = text.indexOf(token, ignoreCase = true)
+                while (startIndex >= 0) {
+                    addStyle(
+                        style = SpanStyle(
+                            color = highlightColor,
+                            fontWeight = FontWeight.SemiBold,
+                            background = highlightColor.copy(alpha = 0.12f)
+                        ),
+                        start = startIndex,
+                        end = startIndex + token.length
+                    )
+                    startIndex = text.indexOf(token, startIndex + token.length, ignoreCase = true)
+                }
+            }
+        }
+    }
+
+    Text(
+        text = annotatedString,
+        modifier = modifier,
+        fontSize = fontSize,
+        color = baseColor,
+        maxLines = maxLines,
+        overflow = TextOverflow.Ellipsis,
+        fontWeight = fontWeight,
+        lineHeight = lineHeight
+    )
+}
+
+@Composable
 fun SearchCard(
     article: ArticleEntity,
     viewModel: MainViewModel,
@@ -796,11 +859,12 @@ fun SearchCard(
 ) {
     val bookmarkedIds by viewModel.bookmarkedIds.collectAsStateWithLifecycle()
     val isBookmarked = bookmarkedIds.contains(article.id)
+    val query by viewModel.searchQuery.collectAsStateWithLifecycle()
 
     var displayExcerpt by remember(article.id) { mutableStateOf(article.excerpt) }
-    LaunchedEffect(article.id) {
-        if (displayExcerpt.startsWith("Статья из архива")) {
-            val excerpt = viewModel.fetchArticleExcerpt(article)
+    LaunchedEffect(article.id, query) {
+        if (displayExcerpt.startsWith("Статья из архива") || query.length >= 2) {
+            val excerpt = viewModel.fetchArticleExcerpt(article, query)
             if (excerpt.isNotEmpty()) {
                 displayExcerpt = excerpt
             }
@@ -821,12 +885,14 @@ fun SearchCard(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
+                HighlightedText(
                     text = article.title,
+                    query = query,
                     fontWeight = FontWeight.Bold,
                     fontSize = 17.sp,
-                    color = MaterialTheme.colorScheme.onBackground,
-                    modifier = Modifier.weight(1f)
+                    baseColor = MaterialTheme.colorScheme.onBackground,
+                    modifier = Modifier.weight(1f),
+                    maxLines = 2
                 )
                 IconButton(
                     onClick = { viewModel.toggleBookmark(article) },
@@ -841,12 +907,12 @@ fun SearchCard(
                 }
             }
             Spacer(modifier = Modifier.height(6.dp))
-            Text(
+            HighlightedText(
                 text = displayExcerpt,
+                query = query,
                 fontSize = 13.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                baseColor = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
                 lineHeight = 17.sp
             )
             Spacer(modifier = Modifier.height(12.dp))

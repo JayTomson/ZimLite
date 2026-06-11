@@ -864,7 +864,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    suspend fun fetchArticleExcerpt(article: ArticleEntity): String {
+    suspend fun fetchArticleExcerpt(article: ArticleEntity, query: String = ""): String {
         return withContext(Dispatchers.IO) {
             try {
                 val archive = archiveDao.getArchiveById(article.archiveId) ?: return@withContext ""
@@ -875,6 +875,47 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     .toString()
                     .replace(Regex("\\s+"), " ")
                     .trim()
+                
+                if (query.isNotEmpty() && query.length >= 2) {
+                    val tokens = query.split("\\s+".toRegex()).filter { it.length >= 2 }
+                    var bestIndex = -1
+                    var bestTokenLen = 0
+                    
+                    for (token in tokens) {
+                        val index = text.indexOf(token, ignoreCase = true)
+                        if (index != -1 && token.length > bestTokenLen) {
+                            bestIndex = index
+                            bestTokenLen = token.length
+                        }
+                    }
+                    
+                    if (bestIndex != -1) {
+                        val start = maxOf(0, bestIndex - 60)
+                        val end = minOf(text.length, bestIndex + 140)
+                        var snippet = text.substring(start, end)
+                        
+                        // Try to cut at word boundaries
+                        if (start > 0) {
+                            val firstSpace = snippet.indexOf(' ')
+                            if (firstSpace != -1 && firstSpace < 20) {
+                                snippet = "…" + snippet.substring(firstSpace + 1)
+                            } else {
+                                snippet = "…" + snippet
+                            }
+                        }
+                        
+                        if (end < text.length) {
+                            val lastSpace = snippet.lastIndexOf(' ')
+                            if (lastSpace != -1 && lastSpace > snippet.length - 20) {
+                                snippet = snippet.substring(0, lastSpace) + "…"
+                            } else {
+                                snippet = snippet + "…"
+                            }
+                        }
+                        return@withContext snippet
+                    }
+                }
+
                 if (text.length > 200) text.take(200) + "…" else text
             } catch (e: Exception) { "" }
         }
