@@ -8,6 +8,7 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.webkit.WebChromeClient
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -33,6 +34,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.material.icons.automirrored.filled.Feed
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.LibraryBooks
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
@@ -80,13 +83,20 @@ fun ZimLiteApp(viewModel: MainViewModel) {
     
     val archives by viewModel.archives.collectAsStateWithLifecycle()
 
-    // File selection launcher for custom local ZIM archives
+    // File selection launcher for custom local ZIM archives or HTML files
     val fileLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
     ) { uri: Uri? ->
         uri?.let {
-            val fileName = getFileNameFromUri(context, it) ?: "local_archive.zim"
-            viewModel.selectLocalZimFile(it, fileName)
+            val fileName = getFileNameFromUri(context, it) ?: "local_file.zim"
+            val loweredName = fileName.lowercase()
+            if (loweredName.endsWith(".zim")) {
+                viewModel.selectLocalZimFile(it, fileName)
+            } else if (loweredName.endsWith(".html") || loweredName.endsWith(".htm")) {
+                viewModel.selectLocalHtmlFile(it, fileName)
+            } else {
+                android.widget.Toast.makeText(context, "Выберите файл с расширением .zim или .html", android.widget.Toast.LENGTH_LONG).show()
+            }
         }
     }
 
@@ -106,7 +116,7 @@ fun ZimLiteApp(viewModel: MainViewModel) {
                             )
                             Text(
                                 text = when (currentTab) {
-                                    0 -> "Discover"
+                                    0 -> "Лента"
                                     1 -> "Поиск"
                                     else -> "Закладки"
                                 },
@@ -316,6 +326,23 @@ fun ZimLiteApp(viewModel: MainViewModel) {
             }
         }
 
+        val activeWebUrl by remember { derivedStateOf { viewModel.activeWebUrl.value } }
+
+        // Animated overlay for WebView / External Web Reader Screen
+        AnimatedVisibility(
+            visible = activeWebUrl != null,
+            enter = slideInHorizontally(initialOffsetX = { it }, animationSpec = tween(280)) + fadeIn(),
+            exit = slideOutHorizontally(targetOffsetX = { it }, animationSpec = tween(250)) + fadeOut(),
+            modifier = Modifier.fillMaxSize()
+        ) {
+            activeWebUrl?.let { url ->
+                WebReaderScreen(
+                    url = url,
+                    onBack = { viewModel.activeWebUrl.value = null }
+                )
+            }
+        }
+
         // Dim background and circular indices indexer overlay
         val isIndexing by viewModel.isIndexing.collectAsStateWithLifecycle()
         if (isIndexing) {
@@ -414,11 +441,73 @@ fun EmptyStateScreen(onGoToSettings: () -> Unit) {
 @Composable
 fun FeedScreen(viewModel: MainViewModel) {
     val feedArticles by viewModel.feedArticles.collectAsStateWithLifecycle()
+    val archives by viewModel.archives.collectAsStateWithLifecycle()
+    val isIndexing by viewModel.isIndexing.collectAsStateWithLifecycle()
 
     Column(modifier = Modifier.fillMaxSize()) {
-        if (feedArticles.isEmpty()) {
+        if (isIndexing) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                CircularProgressIndicator()
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
+                    Text(
+                        text = "Индексация статей...",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        } else if (archives.isEmpty()) {
+            Box(modifier = Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(16.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.LibraryBooks,
+                        contentDescription = null,
+                        modifier = Modifier.size(64.dp),
+                        tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.6f)
+                    )
+                    Text(
+                        text = "Добро пожаловать в ZimLite!",
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onBackground,
+                        textAlign = TextAlign.Center
+                    )
+                    Text(
+                        text = "Для начала чтения скачайте архив в настройках (иконка шестерёнки вверху справа) или выберите локальный .zim / .html файл.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center
+                    )
+                    Button(
+                        onClick = { viewModel.insideSettings.value = true },
+                        shape = RoundedCornerShape(20.dp)
+                    ) {
+                        Icon(imageVector = Icons.Default.Settings, contentDescription = null)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Перейти к загрузкам")
+                    }
+                }
+            }
+        } else if (feedArticles.isEmpty()) {
+            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
+                    Text(
+                        text = "Загрузка ленты...",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             }
         } else {
             LazyColumn(
@@ -585,7 +674,7 @@ fun SearchScreen(viewModel: MainViewModel) {
         if (searchedArticles.isEmpty()) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Text(
-                    text = "Ничего не найдено",
+                    text = if (searchQuery.trim().isEmpty()) "Введите поисковый запрос" else "Ничего не найдено",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     style = MaterialTheme.typography.bodyMedium
                 )
@@ -786,7 +875,7 @@ fun SettingsScreen(
             verticalAlignment = Alignment.CenterVertically
         ) {
             IconButton(onClick = onClose) {
-                Icon(Icons.Default.ArrowBack, contentDescription = "Назад")
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Назад")
             }
             Spacer(modifier = Modifier.width(8.dp))
             Text(
@@ -957,7 +1046,7 @@ fun SettingsScreen(
                 ) {
                     Icon(imageVector = Icons.Default.FolderOpen, contentDescription = null)
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text("Выбрать файл .ZIM из памяти устройства")
+                    Text("Выбрать файл .ZIM или .HTML")
                 }
             }
 
@@ -998,7 +1087,7 @@ fun SettingsScreen(
                         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f))
                     ) {
                         Text(
-                            text = "У вас нет загруженных архивов. Скачайте Википедию/Викицитатник или выберите локальный .zim файл.",
+                            text = "У вас нет загруженных архивов. Скачайте Википедию/Викицитатник или выберите локальный .zim / .html файл.",
                             modifier = Modifier.padding(16.dp),
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             textAlign = TextAlign.Center,
@@ -1026,22 +1115,48 @@ fun SettingsScreen(
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
             ) {
                 Column(modifier = Modifier.padding(16.dp)) {
-                    Text(
-                        text = "Скачиваем: $downloadArcName",
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer,
-                        fontSize = 14.sp
-                    )
-                    Spacer(modifier = Modifier.height(4.dp))
-                    LinearProgressIndicator(
-                        progress = { progress },
+                    Row(
                         modifier = Modifier.fillMaxWidth(),
-                        color = MaterialTheme.colorScheme.primary
-                    )
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Скачиваем: $downloadArcName",
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                            fontSize = 14.sp,
+                            modifier = Modifier.weight(1f)
+                        )
+                        IconButton(
+                            onClick = { viewModel.cancelDownload() },
+                            modifier = Modifier.size(24.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "Отмена",
+                                tint = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f),
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(4.dp))
+                    if (progress > 0f) {
+                        LinearProgressIndicator(
+                            progress = { progress },
+                            modifier = Modifier.fillMaxWidth(),
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    } else {
+                        LinearProgressIndicator(
+                            modifier = Modifier.fillMaxWidth(),
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
                     Spacer(modifier = Modifier.height(6.dp))
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
                             text = downloadLabel,
@@ -1054,20 +1169,53 @@ fun SettingsScreen(
                             fontWeight = FontWeight.Bold,
                             color = MaterialTheme.colorScheme.onPrimaryContainer
                         )
-                        Text(
-                            text = "${(progress * 100).toInt()}%",
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.onPrimaryContainer
-                        )
+                        if (progress > 0f) {
+                            Text(
+                                text = "${(progress * 100).toInt()}%",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer
+                            )
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End
+                    ) {
+                        TextButton(
+                            onClick = { viewModel.cancelDownload() },
+                            colors = ButtonDefaults.textButtonColors(
+                                contentColor = MaterialTheme.colorScheme.error
+                            ),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                            modifier = Modifier.height(36.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "Отменить скачивание",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
                     }
                 }
             }
         }
 
-        // Show download errors elegantly
+        // Show download errors elegantly (with dismiss action - Issue 9)
         downloadError?.let { err ->
             Snackbar(
+                action = {
+                    TextButton(onClick = { viewModel.downloadError.value = null }) {
+                        Text("ОК", color = MaterialTheme.colorScheme.error)
+                    }
+                },
                 modifier = Modifier.padding(16.dp),
                 shape = RoundedCornerShape(12.dp),
                 containerColor = MaterialTheme.colorScheme.errorContainer,
@@ -1147,6 +1295,29 @@ fun LoadedArchiveCard(
     archive: com.example.data.ArchiveEntity,
     onDelete: () -> Unit
 ) {
+    var showDeleteDialog by remember { mutableStateOf(false) }
+
+    if (showDeleteDialog) {
+        AlertDialog(
+            onDismissRequest = { showDeleteDialog = false },
+            title = { Text("Удалить архив?") },
+            text = { Text("Архив «${archive.title}» будет удалён из памяти устройства. Все ассоциированные с ним статьи станут недоступны.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    onDelete()
+                    showDeleteDialog = false
+                }) {
+                    Text("Удалить", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeleteDialog = false }) {
+                    Text("Отмена")
+                }
+            }
+        )
+    }
+
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -1171,7 +1342,7 @@ fun LoadedArchiveCard(
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
-                        imageVector = Icons.Default.LibraryBooks,
+                        imageVector = Icons.AutoMirrored.Filled.LibraryBooks,
                         contentDescription = null,
                         tint = MaterialTheme.colorScheme.primary,
                         modifier = Modifier.size(20.dp)
@@ -1192,7 +1363,7 @@ fun LoadedArchiveCard(
                     )
                 }
             }
-            IconButton(onClick = onDelete) {
+            IconButton(onClick = { showDeleteDialog = true }) {
                 Icon(
                     imageVector = Icons.Default.Delete,
                     contentDescription = "Удалить архив",
@@ -1228,7 +1399,7 @@ fun ArticleReaderScreen(
                 },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.Default.ArrowBack, contentDescription = "Назад")
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Назад")
                     }
                 },
                 actions = {
@@ -1271,13 +1442,24 @@ fun ArticleReaderScreen(
                                 }
                                 
                                 // 2. Internal wiki article links
-                                if (urlStr.startsWith("zim://local/")) {
-                                    val relativePath = urlStr.substringAfter("zim://local/")
+                                val relativePath = when {
+                                    urlStr.startsWith("zim://local/") -> urlStr.substringAfter("zim://local/")
+                                    !urlStr.startsWith("http://") && !urlStr.startsWith("https://") && (urlStr.contains("wiki/") || urlStr.endsWith(".html")) -> urlStr
+                                    else -> null
+                                }
+                                
+                                if (relativePath != null) {
                                     viewModel.navigateToArticleByUrl(article.archiveId, relativePath)
                                     return true
                                 }
                                 
-                                // 3. External web/app links
+                                // 3. External web/app HTTP/HTTPS links - open inside app's beautiful WebReaderScreen
+                                if (urlStr.startsWith("http://") || urlStr.startsWith("https://")) {
+                                    viewModel.activeWebUrl.value = urlStr
+                                    return true
+                                }
+                                
+                                // 4. Other system intent links
                                 return try {
                                     val intent = Intent(Intent.ACTION_VIEW, Uri.parse(urlStr))
                                     context.startActivity(intent)
@@ -1426,4 +1608,127 @@ fun getFileNameFromUri(context: Context, uri: Uri): String? {
         }
     }
     return uri.path?.substringAfterLast('/')
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun WebReaderScreen(
+    url: String,
+    onBack: () -> Unit
+) {
+    var webTitle by remember { mutableStateOf("Веб-страница") }
+    var webProgress by remember { mutableStateOf(0) }
+    var isLoading by remember { mutableStateOf(true) }
+    var webViewRef by remember { mutableStateOf<WebView?>(null) }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = {
+                    Column {
+                        Text(
+                            text = webTitle,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            fontSize = 16.sp,
+                            color = MaterialTheme.colorScheme.onBackground
+                        )
+                        Text(
+                            text = url,
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Назад")
+                    }
+                },
+                actions = {
+                    IconButton(
+                        onClick = { webViewRef?.reload() },
+                        enabled = webViewRef != null
+                    ) {
+                        Icon(Icons.Default.Refresh, contentDescription = "Обновить")
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.background,
+                    titleContentColor = MaterialTheme.colorScheme.onBackground
+                )
+            )
+        }
+    ) { innerPadding ->
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding)
+        ) {
+            Column(modifier = Modifier.fillMaxSize()) {
+                if (isLoading) {
+                    LinearProgressIndicator(
+                        progress = { webProgress / 100f },
+                        modifier = Modifier.fillMaxWidth(),
+                        color = MaterialTheme.colorScheme.primary,
+                        trackColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.3f)
+                    )
+                }
+                
+                AndroidView(
+                    factory = { context ->
+                        WebView(context).apply {
+                            webViewRef = this
+                            webViewClient = object : WebViewClient() {
+                                override fun onPageStarted(view: WebView?, urlStr: String?, favicon: android.graphics.Bitmap?) {
+                                    super.onPageStarted(view, urlStr, favicon)
+                                    isLoading = true
+                                }
+
+                                override fun onPageFinished(view: WebView?, urlStr: String?) {
+                                    super.onPageFinished(view, urlStr)
+                                    isLoading = false
+                                }
+
+                                override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
+                                    return false // Load inside current WebView
+                                }
+                            }
+                            webChromeClient = object : WebChromeClient() {
+                                override fun onProgressChanged(view: WebView?, newProgress: Int) {
+                                    super.onProgressChanged(view, newProgress)
+                                    webProgress = newProgress
+                                    if (newProgress == 100) {
+                                        isLoading = false
+                                    }
+                                }
+
+                                override fun onReceivedTitle(view: WebView?, title: String?) {
+                                    super.onReceivedTitle(view, title)
+                                    if (!title.isNullOrEmpty()) {
+                                        webTitle = title
+                                    }
+                                }
+                            }
+                            settings.apply {
+                                javaScriptEnabled = true
+                                domStorageEnabled = true
+                                loadWithOverviewMode = true
+                                useWideViewPort = true
+                                layoutAlgorithm = WebSettings.LayoutAlgorithm.TEXT_AUTOSIZING
+                            }
+                            loadUrl(url)
+                        }
+                    },
+                    update = { view ->
+                        // WebView retains state unless URL changes
+                    },
+                    modifier = Modifier.weight(1f)
+                )
+            }
+        }
+    }
 }

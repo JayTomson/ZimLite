@@ -28,6 +28,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // Navigation and screen state
     val currentTab = mutableStateOf(0) // 0 = Feed, 1 = Search, 2 = Bookmarks
     val activeArticle = mutableStateOf<ArticleEntity?>(null)
+    val activeWebUrl = mutableStateOf<String?>(null)
     val insideSettings = mutableStateOf(false)
 
     // Database reactive flows
@@ -44,12 +45,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // Search query implementation
     val searchQuery = MutableStateFlow("")
     
-    // Dynamically filtered articles based on search query
+    // Dynamically filtered articles based on search query (returns empty list instantly if query is empty)
     val searchedArticles: StateFlow<List<ArticleEntity>> = searchQuery
         .debounce(150)
         .flatMapLatest { query ->
             if (query.trim().isEmpty()) {
-                articleDao.getAllArticles()
+                flowOf(emptyList())
             } else {
                 articleDao.searchArticles("%$query%")
             }
@@ -67,6 +68,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val downloadArchiveName = MutableStateFlow("")
     val downloadError = MutableStateFlow<String?>(null)
     val isIndexing = MutableStateFlow(false)
+    var downloadingArchiveId: String? = null
+    private var downloadJob: kotlinx.coroutines.Job? = null
 
     init {
         // Load persistent theme preference
@@ -80,10 +83,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
 
-        // Initialize Feed when archives are downloaded
+        // Initialize Feed reactively. If archives are empty, clear the feed, otherwise refresh with random entries.
         viewModelScope.launch {
             archives.collect { list ->
-                if (list.isNotEmpty() && _feedArticles.value.isEmpty()) {
+                if (list.isEmpty()) {
+                    _feedArticles.value = emptyList()
+                } else {
                     refreshFeed()
                 }
             }
@@ -99,9 +104,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun refreshFeed() {
         viewModelScope.launch {
-            articleDao.getRandomFeedArticles(15).collect { randomList ->
-                // Ensure we get data or map it properly
+            try {
+                // Use first() to take only a single state emission to avoid leaking coroutines
+                val randomList = articleDao.getRandomFeedArticles(15).first()
                 _feedArticles.value = randomList
+            } catch (e: Exception) {
+                e.printStackTrace()
             }
         }
     }
@@ -115,8 +123,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         downloadSpeed.value = "0 KB/s"
         bytesDownloadedLabel.value = "Начало загрузки..."
         downloadArchiveName.value = archiveTitle
+        downloadingArchiveId = archiveId
 
-        viewModelScope.launch {
+        downloadJob = viewModelScope.launch {
             try {
                 ZimDownloader.downloadFile(
                     context = getApplication(),
@@ -134,16 +143,53 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         viewModelScope.launch {
                             // Archive downloaded successfully, now perform dynamic indexing of articles
                             indexDownloadedArchive(file, archiveId, archiveTitle, url)
+                            downloadProgress.value = null
+                            downloadingArchiveId = null
+                            downloadJob = null
                         }
                     },
                     onError = { exception ->
                         downloadProgress.value = null
+                        downloadingArchiveId = null
+                        downloadJob = null
                         downloadError.value = "Ошибка скачивания: ${exception.localizedMessage}"
                     }
                 )
             } catch (e: Exception) {
                 downloadProgress.value = null
-                downloadError.value = "Ошибка: ${e.localizedMessage}"
+                downloadingArchiveId = null
+                downloadJob = null
+                if (e !is kotlinx.coroutines.CancellationException) {
+                    downloadError.value = "Ошибка: ${e.localizedMessage}"
+                }
+            } finally {
+                if (downloadingArchiveId == archiveId) {
+                    downloadProgress.value = null
+                    downloadingArchiveId = null
+                    downloadJob = null
+                }
+            }
+        }
+    }
+
+    // Cancel active download and completely delete file/index elements
+    fun cancelDownload() {
+        val targetId = downloadingArchiveId
+        downloadJob?.cancel()
+        downloadJob = null
+        downloadProgress.value = null
+        downloadSpeed.value = ""
+        bytesDownloadedLabel.value = ""
+        downloadArchiveName.value = ""
+        downloadingArchiveId = null
+        
+        if (targetId != null) {
+            viewModelScope.launch(Dispatchers.IO) {
+                val context = getApplication<Application>()
+                val file = File(context.filesDir, "archives/$targetId.zim")
+                if (file.exists()) {
+                    file.delete()
+                }
             }
         }
     }
@@ -188,10 +234,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         refreshFeed() // Reload feed with newly indexed content
     }
 
-    // Load local file from manager
+    // Load local file from manager (Issue 15 resolved: real size from ContentResolver)
     fun selectLocalZimFile(uri: Uri, name: String) {
         val cleanName = name.replace(".zim", "", ignoreCase = true)
         val id = "local_${System.currentTimeMillis()}"
+        val context = getApplication<Application>()
         
         viewModelScope.launch {
             isIndexing.value = true
@@ -214,12 +261,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 
                 articleDao.insertArticles(articlesToInsert)
                 
+                // Query real file size from ContentResolver
+                val resolvedSize = try {
+                    context.contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.SIZE), null, null, null)?.use { cursor ->
+                        if (cursor.moveToFirst()) {
+                            val sizeIndex = cursor.getColumnIndex(android.provider.OpenableColumns.SIZE)
+                            if (sizeIndex != -1) cursor.getLong(sizeIndex) else 0L
+                        } else 0L
+                    } ?: 0L
+                } catch (e: Exception) {
+                    0L
+                }
+                
+                val fileSizeInBytes = if (resolvedSize > 0) resolvedSize else 1024 * 1024 * 145L // Fallback to 145 MB if resolution fails
+                
                 val newArchive = ArchiveEntity(
                     id = id,
                     title = "Файл: $cleanName",
                     sourceUrl = "Локальный файл",
                     filePath = uri.toString(),
-                    fileSize = 1024 * 1024 * 145L, // Represent as 145 MB
+                    fileSize = fileSizeInBytes,
                     articleCount = articlesToInsert.size,
                     dateAdded = System.currentTimeMillis()
                 )
@@ -245,13 +306,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     file.delete()
                 }
             }
-            // Clear feed if no archives left
-            val count = archiveDao.getArchiveCount()
-            if (count == 0) {
-                _feedArticles.value = emptyList()
-            } else {
-                refreshFeed()
-            }
+            // Feed auto-updates or clears reactively when the Flow at archives emitting changes!
         }
     }
 
@@ -289,6 +344,79 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             if (foundArticle != null) {
                 activeArticle.value = foundArticle
             }
+        }
+    }
+
+    // Load local HTML file from manager
+    fun selectLocalHtmlFile(uri: Uri, name: String) {
+        val cleanName = name.replace(".html", "", ignoreCase = true).replace(".htm", "", ignoreCase = true)
+        val id = "local_html_${System.currentTimeMillis()}"
+        val context = getApplication<Application>()
+        
+        viewModelScope.launch {
+            isIndexing.value = true
+            
+            withContext(Dispatchers.IO) {
+                val htmlContent = try {
+                    context.contentResolver.openInputStream(uri)?.use { stream ->
+                        stream.bufferedReader().use { it.readText() }
+                    } ?: ""
+                } catch (e: Exception) {
+                    ""
+                }
+                
+                if (htmlContent.isNotEmpty()) {
+                    // Extract a clean snippet of text as the excerpt
+                    val textOnly = try {
+                        val parsed = android.text.Html.fromHtml(htmlContent, android.text.Html.FROM_HTML_MODE_LEGACY).toString()
+                        if (parsed.length > 250) parsed.take(200) + "..." else parsed
+                    } catch (e: Exception) {
+                        "Локальный HTML-документ"
+                    }
+                    
+                    val article = ArticleEntity(
+                        id = "${id}_main",
+                        archiveId = id,
+                        archiveTitle = "Файл: $name",
+                        url = "index.html",
+                        title = cleanName,
+                        category = "HTML-документ",
+                        excerpt = textOnly.trim(),
+                        htmlContent = htmlContent,
+                        isFeedCandidate = true
+                    )
+                    
+                    articleDao.insertArticles(listOf(article))
+                    
+                    // Query real file size from ContentResolver
+                    val resolvedSize = try {
+                        context.contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.SIZE), null, null, null)?.use { cursor ->
+                            if (cursor.moveToFirst()) {
+                                val sizeIndex = cursor.getColumnIndex(android.provider.OpenableColumns.SIZE)
+                                if (sizeIndex != -1) cursor.getLong(sizeIndex) else 0L
+                            } else 0L
+                        } ?: 0L
+                    } catch (e: Exception) {
+                        0L
+                    }
+                    
+                    val fileSizeInBytes = if (resolvedSize > 0) resolvedSize else htmlContent.toByteArray().size.toLong()
+                    
+                    val newArchive = ArchiveEntity(
+                        id = id,
+                        title = "Файл: $name",
+                        sourceUrl = "Локальный HTML",
+                        filePath = uri.toString(),
+                        fileSize = fileSizeInBytes,
+                        articleCount = 1,
+                        dateAdded = System.currentTimeMillis()
+                    )
+                    archiveDao.insertArchive(newArchive)
+                }
+            }
+            
+            isIndexing.value = false
+            refreshFeed()
         }
     }
 }

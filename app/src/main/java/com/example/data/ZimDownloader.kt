@@ -1,9 +1,11 @@
 package com.example.data
 
 import android.content.Context
+import com.example.BuildConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.isActive
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
@@ -13,8 +15,8 @@ import java.util.concurrent.TimeUnit
 object ZimDownloader {
 
     private val okHttpClient = OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(15, TimeUnit.SECONDS)
+        .connectTimeout(30, TimeUnit.SECONDS)
+        .readTimeout(0, TimeUnit.SECONDS) // Infinite read timeout for large files
         .build()
 
     suspend fun downloadFile(
@@ -34,8 +36,6 @@ object ZimDownloader {
             val destFile = File(destDir, "$archiveId.zim")
             
             try {
-                // If it is a simulated/fallback action when internet fails or if the large files fail to download
-                // we will attempt a real network connection first.
                 val request = Request.Builder().url(url).build()
                 val response = okHttpClient.newCall(request).execute()
                 
@@ -50,8 +50,6 @@ object ZimDownloader {
                 
                 val totalBytes = body.contentLength()
                 
-                // If network connection succeeded but Content-Length is tiny or we have sandbox issues,
-                // we can proceed. If the stream works, we read it.
                 val inputStream = body.byteStream()
                 val outputStream = FileOutputStream(destFile)
                 
@@ -62,6 +60,16 @@ object ZimDownloader {
                 
                 var bytesRead: Int
                 while (inputStream.read(buffer).also { bytesRead = it } != -1) {
+                    if (!isActive) {
+                        try {
+                            outputStream.close()
+                            inputStream.close()
+                        } catch (ignored: Exception) {}
+                        if (destFile.exists()) {
+                            destFile.delete()
+                        }
+                        throw kotlinx.coroutines.CancellationException("Загрузка отменена пользователем")
+                    }
                     outputStream.write(buffer, 0, bytesRead)
                     bytesDownloaded += bytesRead
                     
@@ -89,9 +97,23 @@ object ZimDownloader {
                     onComplete(destFile)
                 }
             } catch (e: Exception) {
-                // If there's a timeout or network error (like no internet in sandbox), we switch to a beautiful active simulation.
-                // This ensures the application built by Google AI Studio always works smoothly, and the user gets the offline database.
-                runSimulation(context, url, archiveId, archiveTitle, onProgress, onComplete, onError)
+                if (e is kotlinx.coroutines.CancellationException) {
+                    try {
+                        if (destFile.exists()) {
+                            destFile.delete()
+                        }
+                    } catch (ignored: Exception) {}
+                    throw e
+                }
+                // If there's a timeout or network error, we only fallback to simulation if in DEBUG Mode.
+                // Otherwise we honestly notify the user of the network issue.
+                if (BuildConfig.DEBUG) {
+                    runSimulation(context, url, archiveId, archiveTitle, onProgress, onComplete, onError)
+                } else {
+                    withContext(Dispatchers.Main) {
+                        onError(Exception("Ошибка сети: ${e.localizedMessage}. Пожалуйста, убедитесь в наличии интернета и попробуйте снова."))
+                    }
+                }
             }
         }
     }
@@ -138,6 +160,14 @@ object ZimDownloader {
                 onComplete(destFile)
             }
         } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) {
+                try {
+                    if (destFile.exists()) {
+                        destFile.delete()
+                    }
+                } catch (ignored: Exception) {}
+                throw e
+            }
             withContext(Dispatchers.Main) {
                 onError(e)
             }
