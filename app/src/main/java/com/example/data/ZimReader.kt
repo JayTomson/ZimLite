@@ -179,6 +179,34 @@ object ZimReader {
         )
     }
 
+    fun getUrlOffset(source: ZimSource, entryOffset: Long, namespaceChar: Char): Int {
+        try {
+            // Modern ZIM v6 almost always has a 4-byte revision field.
+            // We search for the namespace character at offset 4 or 8 to decide.
+            source.seek(entryOffset + 4)
+            val b4 = source.read()
+            val b5 = source.read()
+            
+            source.seek(entryOffset + 8)
+            val b8 = source.read()
+            val b9 = source.read()
+
+            // If we see "X/" where X is the namespace, we're very confident
+            if (b4 == namespaceChar.code && b5 == '/'.code) return 4
+            if (b8 == namespaceChar.code && b9 == '/'.code) return 8
+
+            // Match only namespace char (could be "XArticleTitle")
+            if (b4 == namespaceChar.code) return 4
+            if (b8 == namespaceChar.code) return 8
+
+            // Printable ASCII or UTF-8 start at offset 4 suggests no revision
+            if (b4 in 0x20..0x7E || b4 >= 0xC0) return 4
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        return 8 // Default to revision present
+    }
+
     fun readDirectoryEntry(source: ZimSource, entryOffset: Long): DirectoryEntry {
         source.seek(entryOffset)
         
@@ -189,22 +217,21 @@ object ZimReader {
         val parameterLen = source.read()
         val namespace = source.read().toChar()
         
-        // Skip revision (4 bytes)
-        source.seek(source.length().coerceAtMost(entryOffset + 8))
+        val urlOffset = getUrlOffset(source, entryOffset, namespace)
+        source.seek(entryOffset + urlOffset.toLong())
         
         val url = readNullTerminatedString(source)
+        val title = readNullTerminatedString(source) // Title follows URL
         
         var clusterNumber = -1
         var blobNumber = -1
         var redirectIndex = -1
-        var title = ""
         
         if (mimeType == 0xFFFF) {
             redirectIndex = readLEInt(source)
         } else {
             clusterNumber = readLEInt(source)
             blobNumber = readLEInt(source)
-            title = readNullTerminatedString(source)
         }
         
         return DirectoryEntry(
@@ -315,8 +342,7 @@ object ZimReader {
                 // Add common variants
                 searchKeys.add("A/$cleanUrl")
                 searchKeys.add("a/$cleanUrl")
-                
-                for (key in searchKeys) {
+                     for (key in searchKeys) {
                     var low = 0
                     var high = header.articleCount - 1
                     
@@ -329,8 +355,9 @@ object ZimReader {
                         source.seek(entryOffset + 3)
                         val nsChar = source.read().toChar()
                         
-                        // Read url at offset 8 of directory entry
-                        source.seek(entryOffset + 8)
+                        // Dynamically locate and seek to the correct URL offset based on whether revision field is present
+                        val urlOffset = getUrlOffset(source, entryOffset, nsChar)
+                        source.seek(entryOffset + urlOffset)
                         val rawUrl = readNullTerminatedString(source)
                         
                         // Construct comparison key matching namespace + "/" + rawUrl structure
@@ -363,7 +390,11 @@ object ZimReader {
                     val mid = (low + high) ushr 1
                     source.seek(header.urlPtrPos + mid * 8)
                     val entryOffset = readLELong(source)
-                    source.seek(entryOffset + 8)
+                    
+                    source.seek(entryOffset + 3)
+                    val nsChar = source.read().toChar()
+                    val urlOffset = getUrlOffset(source, entryOffset, nsChar)
+                    source.seek(entryOffset + urlOffset)
                     val rawUrl = readNullTerminatedString(source)
                     
                     val comp = rawUrl.compareTo(cleanUrl, ignoreCase = true)
@@ -384,8 +415,13 @@ object ZimReader {
                     for (mid in 0 until header.articleCount) {
                         source.seek(header.urlPtrPos + mid * 8L)
                         val entryOffset = readLELong(source)
-                        source.seek(entryOffset + 8)
+                        
+                        source.seek(entryOffset + 3)
+                        val nsChar = source.read().toChar()
+                        val urlOffset = getUrlOffset(source, entryOffset, nsChar)
+                        source.seek(entryOffset + urlOffset)
                         val rawUrl = readNullTerminatedString(source)
+                        
                         val cleanRawUrl = if (rawUrl.contains("/")) rawUrl.substring(rawUrl.indexOf('/') + 1) else rawUrl
                         if (cleanRawUrl.equals(cleanUrl, ignoreCase = true)) {
                             val entry = readDirectoryEntry(source, entryOffset)
@@ -417,7 +453,11 @@ object ZimReader {
                     val mid = (low + high) ushr 1
                     source.seek(header.urlPtrPos + mid * 8)
                     val entryOffset = readLELong(source)
-                    source.seek(entryOffset + 8)
+                    
+                    source.seek(entryOffset + 3)
+                    val nsChar = source.read().toChar()
+                    val urlOffset = getUrlOffset(source, entryOffset, nsChar)
+                    source.seek(entryOffset + urlOffset)
                     val url = readNullTerminatedString(source).lowercase()
                     
                     val cleanUrl = if (url.startsWith("a/")) url.substring(2) else url
