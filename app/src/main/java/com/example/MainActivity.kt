@@ -412,11 +412,19 @@ fun ZimLiteApp(viewModel: MainViewModel) {
 
                         Spacer(modifier = Modifier.height(8.dp))
                         Text(
-                            text = "Распаковываем и строим быстрый полнотекстовый индекс. Это может занять пару минут.",
+                            text = "Читаем структуру архива и строим локальную базу. Большие архивы могут занять минуту.",
                             textAlign = TextAlign.Center,
                             fontSize = 12.sp,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
+                        
+                        Spacer(modifier = Modifier.height(12.dp))
+                        TextButton(
+                            onClick = { viewModel.cancelIndexing() },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("Отменить индексацию", color = MaterialTheme.colorScheme.error)
+                        }
                     }
                 }
             }
@@ -937,6 +945,7 @@ fun SettingsScreen(
     val currentTheme by viewModel.appTheme.collectAsStateWithLifecycle()
     val useOriginalHtml by viewModel.useOriginalHtml.collectAsStateWithLifecycle()
     val searchInContent by viewModel.searchInContent.collectAsStateWithLifecycle()
+    val deepIndexing by viewModel.deepIndexing.collectAsStateWithLifecycle()
     val customZimDirPath by viewModel.customZimDirPath.collectAsStateWithLifecycle()
     val archives by viewModel.archives.collectAsStateWithLifecycle()
 
@@ -947,6 +956,29 @@ fun SettingsScreen(
     val downloadError by viewModel.downloadError.collectAsStateWithLifecycle()
 
     var directUrlInput by remember { mutableStateOf("") }
+    var showDeepIndexingConfirm by remember { mutableStateOf(false) }
+
+    if (showDeepIndexingConfirm) {
+        AlertDialog(
+            onDismissRequest = { showDeepIndexingConfirm = false },
+            title = { Text("Включить глубокий поиск?") },
+            text = { Text("Это позволит искать не только в заголовках, но и по всему тексту статей. " +
+                    "Внимание: это потребует полной переиндексации всех ваших архивов, что может занять много времени (до часа на очень больших базах). Разряжает батарею.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    viewModel.setDeepIndexing(true)
+                    showDeepIndexingConfirm = false
+                }) {
+                    Text("Включить и переиндексировать", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeepIndexingConfirm = false }) {
+                    Text("Отмена")
+                }
+            }
+        )
+    }
 
     // Constants for Wikipedia & Wikiquote Ru nopic files
     val defaultWikiUrl = "https://download.kiwix.org/zim/wikipedia/wikipedia_ru_all_nopic_2026-01.zim"
@@ -1157,6 +1189,43 @@ fun SettingsScreen(
                     Switch(
                         checked = searchInContent,
                         onCheckedChange = { viewModel.setSearchInContent(it) }
+                    )
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f))
+                        .clickable { 
+                            if (!deepIndexing) {
+                                showDeepIndexingConfirm = true
+                            } else {
+                                viewModel.setDeepIndexing(false)
+                            }
+                        }
+                        .padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Глубокий поиск (Контент)",
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(
+                            text = if (deepIndexing) "Включено (извлекаются отрывки и весь текст)" else "Выключено (только заголовки)",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Switch(
+                        checked = deepIndexing,
+                        onCheckedChange = { 
+                            if (it) showDeepIndexingConfirm = true 
+                            else viewModel.setDeepIndexing(false) 
+                        }
                     )
                 }
             }

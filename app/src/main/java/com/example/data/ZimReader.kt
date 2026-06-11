@@ -5,6 +5,8 @@ import android.net.Uri
 import android.util.Log
 import com.github.luben.zstd.ZstdInputStream
 import org.tukaani.xz.LZMA2InputStream
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -843,6 +845,7 @@ object ZimReader {
         archiveId: String,
         archiveTitle: String,
         batchSize: Int = 1000,
+        extractExcerpts: Boolean = false,
         onBatch: suspend (List<ArticleEntity>) -> Unit,
         onProgress: suspend (indexed: Int, total: Int) -> Unit
     ) {
@@ -852,12 +855,12 @@ object ZimReader {
                 val total = header.articleCount
                 val batch = ArrayList<ArticleEntity>(batchSize)
                 
-                // Dynamic decision on whether to extract excerpts during indexing to prevent severe disk IO thrashing on massive ZIMs
-                val shouldExtractExcerpts = true // total <= 30000
+                val shouldExtractExcerpts = extractExcerpts
 
                 for (i in 0 until total) {
                     if (i % 1000 == 0) {
                         onProgress(i, total)
+                        if (!currentCoroutineContext().isActive) break
                     }
 
                     source.seek(header.urlPtrPos + i * 8L)

@@ -30,6 +30,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val appTheme = MutableStateFlow(AppTheme.DARK)
     val useOriginalHtml = MutableStateFlow(true)
     val searchInContent = MutableStateFlow(true)
+    val deepIndexing = MutableStateFlow(false)
     val customZimDirPath = MutableStateFlow<String?>(null)
 
     // Navigation and screen state
@@ -113,6 +114,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val indexingTotal = MutableStateFlow(0)
     var downloadingArchiveId: String? = null
     private var downloadJob: kotlinx.coroutines.Job? = null
+    private var indexingJob: kotlinx.coroutines.Job? = null
 
     init {
         // Load persistent theme preference
@@ -120,6 +122,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         appTheme.value = AppTheme.values().getOrElse(savedThemeOrdinal) { AppTheme.DARK }
         useOriginalHtml.value = sharedPrefs.getBoolean("use_original_html", true)
         searchInContent.value = sharedPrefs.getBoolean("search_in_content", true)
+        deepIndexing.value = sharedPrefs.getBoolean("deep_indexing", false)
         customZimDirPath.value = sharedPrefs.getString("custom_zim_dir", null)
 
         // Start observing bookmarks to keep track of bookmarked IDs
@@ -165,6 +168,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             searchInContent.value = use
             sharedPrefs.edit().putBoolean("search_in_content", use).apply()
+        }
+    }
+
+    fun setDeepIndexing(enabled: Boolean) {
+        viewModelScope.launch {
+            deepIndexing.value = enabled
+            sharedPrefs.edit().putBoolean("deep_indexing", enabled).apply()
+            if (enabled) {
+                indexingJob?.cancel()
+                reindexAllArchives()
+            }
         }
     }
 
@@ -402,6 +416,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 archiveId = archiveId,
                 archiveTitle = archiveTitle,
                 batchSize = 1000,
+                extractExcerpts = deepIndexing.value,
                 onBatch = { batch ->
                     articleDao.insertArticles(batch)
                     val ftsBatch = batch.map {
@@ -456,56 +471,59 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         indexingProgress.value = 0
         indexingTotal.value = 0
         
-        withContext(Dispatchers.IO) {
-            var fileLength = file.length()
-            if (fileLength < 1024 * 1024) {
-                // If the downloaded file is a placeholder/simulated text file, use standardized mock sizes
-                fileLength = when {
-                    archiveId.contains("wikipedia", ignoreCase = true) -> 2147483648L // 2.0 GB representation
-                    archiveId.contains("wikiquote", ignoreCase = true) -> 152043520L // 145 MB representation
-                    else -> 131072000L // 125 MB fallback representation
+        indexingJob = viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                var fileLength = file.length()
+                if (fileLength < 1024 * 1024) {
+                    // If the downloaded file is a placeholder/simulated text file, use standardized mock sizes
+                    fileLength = when {
+                        archiveId.contains("wikipedia", ignoreCase = true) -> 2147483648L // 2.0 GB representation
+                        archiveId.contains("wikiquote", ignoreCase = true) -> 152043520L // 145 MB representation
+                        else -> 131072000L // 125 MB fallback representation
+                    }
                 }
+                
+                val isRealZim = try {
+                    if (file.exists() && file.length() > 1024 * 1024) {
+                        FileZimSource(file).use { pSource ->
+                            val header = ZimReader.readHeader(pSource)
+                            (header.magic and 0xFFFFFF) == 0x4D495A
+                        }
+                    } else false
+                } catch (e: Exception) {
+                    false
+                }
+
+                val totalCount = doFullIndexing(
+                    context = getApplication(),
+                    pathOrUri = file.absolutePath,
+                    isRealZim = isRealZim,
+                    archiveId = archiveId,
+                    archiveTitle = archiveTitle,
+                    cleanNameForFallback = archiveId
+                )
+
+                // Register archive in DB
+                val newArchive = ArchiveEntity(
+                    id = archiveId,
+                    title = archiveTitle,
+                    sourceUrl = url,
+                    filePath = file.absolutePath,
+                    fileSize = fileLength,
+                    articleCount = totalCount,
+                    dateAdded = System.currentTimeMillis()
+                )
+                archiveDao.insertArchive(newArchive)
             }
             
-            val isRealZim = try {
-                if (file.exists() && file.length() > 1024 * 1024) {
-                    FileZimSource(file).use { pSource ->
-                        val header = ZimReader.readHeader(pSource)
-                        (header.magic and 0xFFFFFF) == 0x4D495A
-                    }
-                } else false
-            } catch (e: Exception) {
-                false
-            }
-
-            val totalCount = doFullIndexing(
-                context = getApplication(),
-                pathOrUri = file.absolutePath,
-                isRealZim = isRealZim,
-                archiveId = archiveId,
-                archiveTitle = archiveTitle,
-                cleanNameForFallback = archiveId
-            )
-
-            // Register archive in DB
-            val newArchive = ArchiveEntity(
-                id = archiveId,
-                title = archiveTitle,
-                sourceUrl = url,
-                filePath = file.absolutePath,
-                fileSize = fileLength,
-                articleCount = totalCount,
-                dateAdded = System.currentTimeMillis()
-            )
-            archiveDao.insertArchive(newArchive)
+            // Complete download block
+            isIndexing.value = false
+            indexingProgress.value = 0
+            indexingTotal.value = 0
+            downloadProgress.value = null
+            indexingJob = null
+            refreshFeed() // Reload feed with newly indexed content
         }
-        
-        // Complete download block
-        isIndexing.value = false
-        indexingProgress.value = 0
-        indexingTotal.value = 0
-        downloadProgress.value = null
-        refreshFeed() // Reload feed with newly indexed content
     }
 
     // Load local file from manager (Issue 15 resolved: real size from ContentResolver)
@@ -514,7 +532,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val id = "local_${System.currentTimeMillis()}"
         val context = getApplication<Application>()
         
-        viewModelScope.launch {
+        indexingJob = viewModelScope.launch {
             isIndexing.value = true
             indexingProgress.value = 0
             indexingTotal.value = 0
@@ -567,6 +585,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             isIndexing.value = false
             indexingProgress.value = 0
             indexingTotal.value = 0
+            indexingJob = null
             refreshFeed()
         }
     }
@@ -617,7 +636,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             } catch (e: Exception) {
                 url
             }
-            val cleanUrl = decodedUrl.trim().removePrefix("/")
+            
+            // Normalize path (handle ../ and leading /)
+            var cleanUrl = decodedUrl.trim()
+            while (cleanUrl.startsWith("/") || cleanUrl.startsWith("./")) {
+                cleanUrl = if (cleanUrl.startsWith("/")) cleanUrl.removePrefix("/") else cleanUrl.removePrefix("./")
+            }
+            while (cleanUrl.contains("../")) {
+                cleanUrl = cleanUrl.replace("../", "")
+            }
+            
             var foundArticle = withContext(Dispatchers.IO) {
                 articleDao.getArticleByUrl(archiveId, cleanUrl)
             }
@@ -657,8 +685,89 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             
             if (foundArticle != null) {
+                // Navigate immediately
                 activeArticle.value = foundArticle
+                
+                // If content is already there, we are done
+                if (foundArticle.htmlContent.isNotEmpty()) return@launch
+                
+                // Fetch HTML in background (Fixes Infinite Loading when clicking links)
+                val articleToLoad = foundArticle
+                val loadedArticle = withContext(Dispatchers.IO) {
+                    try {
+                        val archive = archiveDao.getArchiveById(articleToLoad.archiveId)
+                        if (archive != null) {
+                            val html = ZimReader.getHtmlByUrl(getApplication(), archive.filePath, articleToLoad.url)
+                            if (html.isNotEmpty()) {
+                                articleToLoad.copy(htmlContent = html)
+                            } else null
+                        } else null
+                    } catch (e: Throwable) {
+                        null
+                    }
+                }
+                
+                if (activeArticle.value?.id == articleToLoad.id) {
+                    if (loadedArticle != null) {
+                        activeArticle.value = loadedArticle
+                    } else {
+                        activeArticle.value = articleToLoad.copy(htmlContent = "<h3>Ошибка загрузки</h3><p>Не удалось загрузить содержимое статьи.</p>")
+                    }
+                }
             }
+        }
+    }
+
+    fun reindexAllArchives() {
+        indexingJob?.cancel()
+        indexingJob = viewModelScope.launch {
+            val allArchives = archives.value
+            if (allArchives.isEmpty()) return@launch
+            
+            isIndexing.value = true
+            try {
+                for (archive in allArchives) {
+                    if (archive.filePath.isEmpty()) continue
+                    
+                    downloadArchiveName.value = archive.title
+                    indexingProgress.value = 0
+                    indexingTotal.value = 0
+                    
+                    withContext(Dispatchers.IO) {
+                        val isRealZim = archive.filePath.endsWith(".zim", ignoreCase = true)
+                        doFullIndexing(
+                            context = getApplication(),
+                            pathOrUri = archive.filePath,
+                            isRealZim = isRealZim,
+                            archiveId = archive.id,
+                            archiveTitle = archive.title,
+                            cleanNameForFallback = archive.title
+                        )
+                    }
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            } finally {
+                isIndexing.value = false
+                indexingProgress.value = 0
+                indexingTotal.value = 0
+                indexingJob = null
+                refreshFeed()
+            }
+        }
+    }
+
+    fun cancelIndexing() {
+        indexingJob?.cancel()
+        indexingJob = null
+        isIndexing.value = false
+        indexingProgress.value = 0
+        indexingTotal.value = 0
+        
+        // If we were doing deep indexing, turn it off as the process was interrupted
+        if (deepIndexing.value) {
+            deepIndexing.value = false
+            sharedPrefs.edit().putBoolean("deep_indexing", false).apply()
         }
     }
 
@@ -668,7 +777,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val id = "local_html_${System.currentTimeMillis()}"
         val context = getApplication<Application>()
         
-        viewModelScope.launch {
+        indexingJob = viewModelScope.launch {
             isIndexing.value = true
             
             withContext(Dispatchers.IO) {
@@ -731,6 +840,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             
             isIndexing.value = false
+            indexingJob = null
             refreshFeed()
         }
     }
