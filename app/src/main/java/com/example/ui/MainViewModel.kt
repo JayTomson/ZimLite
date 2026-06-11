@@ -2,8 +2,11 @@ package com.example.ui
 
 import android.app.Application
 import android.content.Context
+import android.content.Intent
 import android.net.Uri
+import android.util.Log
 import androidx.compose.runtime.mutableStateOf
+import androidx.documentfile.provider.DocumentFile
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.*
@@ -13,8 +16,7 @@ import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
-
-import kotlinx.coroutines.runBlocking
+import java.util.UUID
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -26,6 +28,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     // Current app theme selection (default is DARK as specified)
     val appTheme = MutableStateFlow(AppTheme.DARK)
+    val useOriginalHtml = MutableStateFlow(true)
+    val searchInContent = MutableStateFlow(true)
+    val customZimDirPath = MutableStateFlow<String?>(null)
 
     // Navigation and screen state
     val currentTab = mutableStateOf(0) // 0 = Feed, 1 = Search, 2 = Bookmarks
@@ -48,9 +53,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val searchQuery = MutableStateFlow("")
     
     // Dynamically filtered articles based on search query (returns empty list instantly if query is empty)
-    val searchedArticles: StateFlow<List<ArticleEntity>> = searchQuery
+    val searchedArticles: StateFlow<List<ArticleEntity>> = combine(searchQuery, searchInContent) { query, inContent ->
+        Pair(query, inContent)
+    }
         .debounce(250)
-        .flatMapLatest { query ->
+        .flatMapLatest { (query, inContent) ->
             val cleanQuery = query.trim()
             if (cleanQuery.length < 2) {
                 flowOf(emptyList())
@@ -70,10 +77,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     } else {
                         val results = withContext(Dispatchers.IO) {
                             try {
-                                articleDao.searchArticlesFts(ftsQuery, limit = 50)
+                                if (inContent) {
+                                    articleDao.searchArticlesFts(ftsQuery, limit = 50)
+                                } else {
+                                    articleDao.searchArticlesByTitle("%$cleanQuery%").first()
+                                }
                             } catch (e: Exception) {
                                 e.printStackTrace()
-                                articleDao.searchArticles("%$cleanQuery%").first()
+                                if (inContent) {
+                                    articleDao.searchArticles("%$cleanQuery%").first().take(50)
+                                } else {
+                                    articleDao.searchArticlesByTitle("%$cleanQuery%").first()
+                                }
                             }
                         }
                         emit(results)
@@ -103,6 +118,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // Load persistent theme preference
         val savedThemeOrdinal = sharedPrefs.getInt("theme_key", AppTheme.DARK.ordinal)
         appTheme.value = AppTheme.values().getOrElse(savedThemeOrdinal) { AppTheme.DARK }
+        useOriginalHtml.value = sharedPrefs.getBoolean("use_original_html", true)
+        searchInContent.value = sharedPrefs.getBoolean("search_in_content", true)
+        customZimDirPath.value = sharedPrefs.getString("custom_zim_dir", null)
 
         // Start observing bookmarks to keep track of bookmarked IDs
         viewModelScope.launch {
@@ -110,6 +128,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _bookmarkedIds.value = list.map { it.id }.toSet()
             }
         }
+
+        // Auto-scan if custom path exists
+        customZimDirPath.value?.let { scanLocalArchives(it) }
 
         // Initialize Feed reactively. If archives are empty, clear the feed, otherwise refresh with random entries.
         viewModelScope.launch {
@@ -133,13 +154,106 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun selectArticle(article: ArticleEntity) {
+    fun setUseOriginalHtml(use: Boolean) {
         viewModelScope.launch {
-            if (article.htmlContent.isNotEmpty()) {
-                activeArticle.value = article
-                return@launch
+            useOriginalHtml.value = use
+            sharedPrefs.edit().putBoolean("use_original_html", use).apply()
+        }
+    }
+
+    fun setSearchInContent(use: Boolean) {
+        viewModelScope.launch {
+            searchInContent.value = use
+            sharedPrefs.edit().putBoolean("search_in_content", use).apply()
+        }
+    }
+
+    fun setCustomZimDir(path: String?) {
+        viewModelScope.launch {
+            customZimDirPath.value = path
+            sharedPrefs.edit().putString("custom_zim_dir", path).apply()
+            if (path != null) {
+                scanLocalArchives(path)
             }
-            isIndexing.value = true
+        }
+    }
+
+    fun refreshCustomDir() {
+        customZimDirPath.value?.let { scanLocalArchives(it) }
+    }
+
+    fun scanLocalArchives(uriString: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val context = getApplication<Application>()
+                val treeUri = Uri.parse(uriString)
+                
+                // Persist permissions
+                try {
+                    context.contentResolver.takePersistableUriPermission(
+                        treeUri,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION
+                    )
+                } catch (e: Exception) {
+                    // Might already have it or fail if not from SAF
+                }
+
+                val documentTree = DocumentFile.fromTreeUri(context, treeUri)
+                if (documentTree != null && documentTree.isDirectory) {
+                    val zimFiles = documentTree.listFiles().filter { 
+                        it.name?.lowercase()?.endsWith(".zim") == true 
+                    }
+
+                    val currentArchives = archiveDao.getAllArchives().first()
+
+                    for (file in zimFiles) {
+                        val fileName = file.name ?: continue
+                        val filePath = file.uri.toString()
+                        
+                        // Check if already exists
+                        val existing = currentArchives.find { it.filePath == filePath }
+                        if (existing == null) {
+                            // Read header to get title and count if possible
+                            val (archiveTitle, articleCount) = try {
+                                ZimReader.openSource(context, filePath).use { source ->
+                                    val header = ZimReader.readHeader(source)
+                                    Pair(fileName.substringBeforeLast("."), header.articleCount)
+                                }
+                            } catch (e: Exception) {
+                                Pair(fileName.substringBeforeLast("."), 0)
+                            }
+
+                            val newArchive = ArchiveEntity(
+                                id = UUID.randomUUID().toString(),
+                                title = archiveTitle,
+                                sourceUrl = "",
+                                filePath = filePath,
+                                fileSize = file.length(),
+                                articleCount = articleCount,
+                                dateAdded = System.currentTimeMillis(),
+                                isDownloading = false,
+                                downloadProgress = 1.0f,
+                                downloadSpeed = ""
+                            )
+                            archiveDao.insertArchive(newArchive)
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e("MainViewModel", "Scan failed", e)
+            }
+        }
+    }
+
+    fun selectArticle(article: ArticleEntity) {
+        // Navigate immediately
+        activeArticle.value = article
+        
+        // If content is already there, we are done
+        if (article.htmlContent.isNotEmpty()) return
+        
+        // Fetch HTML in background to support themed view or future use
+        viewModelScope.launch {
             val loadedArticle = withContext(Dispatchers.IO) {
                 try {
                     val archive = archiveDao.getArchiveById(article.archiveId)
@@ -147,19 +261,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         val html = ZimReader.getHtmlByUrl(getApplication(), archive.filePath, article.url)
                         if (html.isNotEmpty()) {
                             article.copy(htmlContent = html)
-                        } else {
-                            article.copy(htmlContent = "<h3>Ошибка: Не удалось прочитать содержимое статьи из архива</h3>")
-                        }
-                    } else {
-                        article.copy(htmlContent = "<h3>Ошибка: Сбой поиска архива</h3>")
-                    }
+                        } else null
+                    } else null
                 } catch (e: Throwable) {
-                    e.printStackTrace()
-                    article.copy(htmlContent = "<h3>Ошибка при чтении статьи: ${e.localizedMessage ?: e.message}</h3>")
+                    null
                 }
             }
-            isIndexing.value = false
-            activeArticle.value = loadedArticle
+            
+            // If the user hasn't switched to another article yet, update it
+            if (activeArticle.value?.id == article.id) {
+                if (loadedArticle != null) {
+                    activeArticle.value = loadedArticle
+                } else {
+                    activeArticle.value = article.copy(htmlContent = "<h3>Ошибка загрузки</h3><p>Не удалось загрузить содержимое статьи. Возможно, архив поврежден или статья отсутствует по указанному пути: ${article.url}</p>")
+                }
+            }
         }
     }
 
@@ -616,6 +732,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             
             isIndexing.value = false
             refreshFeed()
+        }
+    }
+
+    suspend fun fetchArticleExcerpt(article: ArticleEntity): String {
+        return withContext(Dispatchers.IO) {
+            try {
+                val archive = archiveDao.getArchiveById(article.archiveId) ?: return@withContext ""
+                val path = archive.filePath
+                val html = com.example.data.ZimReader.getHtmlByUrl(getApplication(), path, article.url)
+                if (html.isEmpty() || html.contains("Ошибка:")) return@withContext ""
+                val text = android.text.Html.fromHtml(html, android.text.Html.FROM_HTML_MODE_LEGACY)
+                    .toString()
+                    .replace(Regex("\\s+"), " ")
+                    .trim()
+                if (text.length > 200) text.take(200) + "…" else text
+            } catch (e: Exception) { "" }
         }
     }
 }

@@ -5,6 +5,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -98,6 +99,15 @@ fun ZimLiteApp(viewModel: MainViewModel) {
             } else {
                 android.widget.Toast.makeText(context, "Выберите файл с расширением .zim или .html", android.widget.Toast.LENGTH_LONG).show()
             }
+        }
+    }
+
+    // Directory selection launcher for ZIM archive folder
+    val folderLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree()
+    ) { uri: Uri? ->
+        uri?.let {
+            viewModel.setCustomZimDir(it.toString())
         }
     }
 
@@ -306,6 +316,7 @@ fun ZimLiteApp(viewModel: MainViewModel) {
                 SettingsScreen(
                     viewModel = viewModel,
                     onSelectLocalFile = { fileLauncher.launch("*/*") },
+                    onSelectFolder = { folderLauncher.launch(null) },
                     onClose = { viewModel.insideSettings.value = false }
                 )
             }
@@ -592,6 +603,16 @@ fun FeedCard(
     val bookmarkedIds by viewModel.bookmarkedIds.collectAsStateWithLifecycle()
     val isBookmarked = bookmarkedIds.contains(article.id)
 
+    var displayExcerpt by remember(article.id) { mutableStateOf(article.excerpt) }
+    LaunchedEffect(article.id) {
+        if (displayExcerpt.startsWith("Статья из архива")) {
+            val excerpt = viewModel.fetchArticleExcerpt(article)
+            if (excerpt.isNotEmpty()) {
+                displayExcerpt = excerpt
+            }
+        }
+    }
+
     val isWiki = article.category.contains("wiki", ignoreCase = true)
     val isQuote = article.category.contains("quote", ignoreCase = true)
 
@@ -658,7 +679,7 @@ fun FeedCard(
             )
             Spacer(modifier = Modifier.height(8.dp))
             Text(
-                text = article.excerpt,
+                text = displayExcerpt,
                 fontSize = 14.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 3,
@@ -760,6 +781,16 @@ fun SearchCard(
     val bookmarkedIds by viewModel.bookmarkedIds.collectAsStateWithLifecycle()
     val isBookmarked = bookmarkedIds.contains(article.id)
 
+    var displayExcerpt by remember(article.id) { mutableStateOf(article.excerpt) }
+    LaunchedEffect(article.id) {
+        if (displayExcerpt.startsWith("Статья из архива")) {
+            val excerpt = viewModel.fetchArticleExcerpt(article)
+            if (excerpt.isNotEmpty()) {
+                displayExcerpt = excerpt
+            }
+        }
+    }
+
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -795,7 +826,7 @@ fun SearchCard(
             }
             Spacer(modifier = Modifier.height(6.dp))
             Text(
-                text = article.excerpt,
+                text = displayExcerpt,
                 fontSize = 13.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 2,
@@ -900,9 +931,13 @@ fun BookmarksScreen(viewModel: MainViewModel) {
 fun SettingsScreen(
     viewModel: MainViewModel,
     onSelectLocalFile: () -> Unit,
+    onSelectFolder: () -> Unit,
     onClose: () -> Unit
 ) {
     val currentTheme by viewModel.appTheme.collectAsStateWithLifecycle()
+    val useOriginalHtml by viewModel.useOriginalHtml.collectAsStateWithLifecycle()
+    val searchInContent by viewModel.searchInContent.collectAsStateWithLifecycle()
+    val customZimDirPath by viewModel.customZimDirPath.collectAsStateWithLifecycle()
     val archives by viewModel.archives.collectAsStateWithLifecycle()
 
     val downloadProgress by viewModel.downloadProgress.collectAsStateWithLifecycle()
@@ -979,6 +1014,149 @@ fun SettingsScreen(
                         isSelected = currentTheme == AppTheme.AMOLED,
                         onClick = { viewModel.setAppTheme(AppTheme.AMOLED) },
                         modifier = Modifier.weight(1f)
+                    )
+                }
+            }
+
+            item {
+                Text(
+                    text = "Локальное хранилище",
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.primary,
+                    fontSize = 14.sp,
+                    modifier = Modifier.padding(top = 16.dp)
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                
+                // Folder Selection Card
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f))
+                        .padding(16.dp)
+                ) {
+                    Text(
+                        text = "Папка с архивами",
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        text = customZimDirPath?.let { 
+                            Uri.parse(it).path ?: "Выбрано: $it" 
+                        } ?: "Папка не выбрана. ZIM файлы из неё будут добавлены автоматически.",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Button(
+                            onClick = onSelectFolder,
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(8.dp),
+                            contentPadding = PaddingValues(0.dp)
+                        ) {
+                            Icon(Icons.Default.Folder, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Выбрать", fontSize = 13.sp)
+                        }
+                        
+                        if (customZimDirPath != null) {
+                            OutlinedButton(
+                                onClick = { viewModel.refreshCustomDir() },
+                                modifier = Modifier.weight(1f),
+                                shape = RoundedCornerShape(8.dp),
+                                contentPadding = PaddingValues(0.dp)
+                            ) {
+                                Icon(Icons.Default.Sync, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("Обновить", fontSize = 13.sp)
+                            }
+                        }
+                    }
+                }
+                
+                Spacer(modifier = Modifier.height(12.dp))
+                
+                // Direct file button
+                OutlinedButton(
+                    onClick = onSelectLocalFile,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Icon(Icons.Default.FileOpen, contentDescription = null)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Открыть отдельный файл .zim")
+                }
+            }
+
+            item {
+                Text(
+                    text = "Отображение контента",
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.primary,
+                    fontSize = 14.sp,
+                    modifier = Modifier.padding(top = 16.dp)
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f))
+                        .clickable { viewModel.setUseOriginalHtml(!useOriginalHtml) }
+                        .padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Оригинальный HTML",
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(
+                            text = if (useOriginalHtml) "Оригинальный вид (как в ZIM)" else "Стилизация под тему приложения",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Switch(
+                        checked = useOriginalHtml,
+                        onCheckedChange = { viewModel.setUseOriginalHtml(it) }
+                    )
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f))
+                        .clickable { viewModel.setSearchInContent(!searchInContent) }
+                        .padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Поиск по содержанию",
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(
+                            text = if (searchInContent) "Искать в заголовках и внутри статей (FTS)" else "Искать только в заголовках",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Switch(
+                        checked = searchInContent,
+                        onCheckedChange = { viewModel.setSearchInContent(it) }
                     )
                 }
             }
@@ -1438,6 +1616,7 @@ fun ArticleReaderScreen(
     onBack: () -> Unit
 ) {
     val currentTheme by viewModel.appTheme.collectAsStateWithLifecycle()
+    val useOriginalHtml by viewModel.useOriginalHtml.collectAsStateWithLifecycle()
     val bookmarkedIds by viewModel.bookmarkedIds.collectAsStateWithLifecycle()
     val isBookmarked = bookmarkedIds.contains(article.id)
 
@@ -1474,18 +1653,26 @@ fun ArticleReaderScreen(
             )
         }
     ) { innerPadding ->
-        // Direct customized HTML loader with webview client
         Box(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
         ) {
-            val compiledHtml = remember(article, currentTheme) {
-                compileHtmlWithTheme(article.htmlContent, currentTheme)
-            }
-
-            AndroidView(
-                factory = { context ->
+            if (article.htmlContent.isEmpty()) {
+                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator()
+                }
+            } else {
+                val displayHtml = remember(article, currentTheme, useOriginalHtml) {
+                    if (useOriginalHtml) {
+                        article.htmlContent
+                    } else {
+                        compileHtmlWithTheme(article.htmlContent, currentTheme)
+                    }
+                }
+    
+                AndroidView(
+                    factory = { context ->
                     WebView(context).apply {
                         webViewClient = object : WebViewClient() {
                             private fun handleLinkClicked(targetUrl: String): Boolean {
@@ -1493,19 +1680,22 @@ fun ArticleReaderScreen(
                                 if (urlStr.isEmpty()) return false
                                 
                                 // 1. Anchor within the same article
-                                if (urlStr.startsWith("#") || urlStr.startsWith("zim://local/#")) {
+                                if (urlStr.startsWith("#") || urlStr.startsWith("zim://local/#") || urlStr.startsWith("https://app.zim/#")) {
                                     return false // Let WebView handle internal scrolling
                                 }
                                 
                                 // 2. Internal wiki article links
                                 val relativePath = when {
+                                    urlStr.startsWith("https://app.zim/") -> urlStr.substringAfter("https://app.zim/")
                                     urlStr.startsWith("zim://local/") -> urlStr.substringAfter("zim://local/")
-                                    !urlStr.startsWith("http://") && !urlStr.startsWith("https://") && (urlStr.contains("wiki/") || urlStr.endsWith(".html")) -> urlStr
+                                    !urlStr.startsWith("http://") && !urlStr.startsWith("https://") -> urlStr
                                     else -> null
                                 }
                                 
                                 if (relativePath != null) {
-                                    viewModel.navigateToArticleByUrl(article.archiveId, relativePath)
+                                    if (relativePath.isNotEmpty() && relativePath != "/") {
+                                        viewModel.navigateToArticleByUrl(article.archiveId, relativePath)
+                                    }
                                     return true
                                 }
                                 
@@ -1533,9 +1723,30 @@ fun ArticleReaderScreen(
                             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                                 return handleLinkClicked(request.url.toString())
                             }
+
+                            override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
+                                val urlStr = request.url.toString()
+                                if (urlStr.startsWith("https://app.zim/")) {
+                                    val pathEncoded = urlStr.substringAfter("https://app.zim/")
+                                    if (pathEncoded.isEmpty() || pathEncoded == "/") {
+                                        return WebResourceResponse("text/plain", "UTF-8", 404, "Not Found", null, java.io.ByteArrayInputStream("".toByteArray()))
+                                    }
+                                    
+                                    val path = Uri.decode(pathEncoded)
+                                    val archive = viewModel.archives.value.find { it.id == article.archiveId }
+                                    if (archive != null) {
+                                        val result = com.example.data.ZimReader.getBlobByUrl(context, archive.filePath, path)
+                                        if (result != null) {
+                                            return WebResourceResponse(result.second, "UTF-8", result.first.inputStream())
+                                        }
+                                    }
+                                    return WebResourceResponse("text/plain", "UTF-8", 404, "Not Found", null, java.io.ByteArrayInputStream("".toByteArray()))
+                                }
+                                return super.shouldInterceptRequest(view, request)
+                            }
                         }
                         settings.apply {
-                            javaScriptEnabled = true
+                            javaScriptEnabled = false
                             domStorageEnabled = true
                             loadWithOverviewMode = true
                             useWideViewPort = true
@@ -1545,19 +1756,20 @@ fun ArticleReaderScreen(
                 },
                 update = { webView ->
                     val currentContent = webView.getTag(R.id.tag_webview_content) as? String
-                    if (currentContent != compiledHtml) {
+                    if (currentContent != displayHtml) {
                         webView.loadDataWithBaseURL(
-                            "zim://local/",
-                            compiledHtml,
+                            "https://app.zim/",
+                            displayHtml,
                             "text/html",
                             "UTF-8",
                             null
                         )
-                        webView.setTag(R.id.tag_webview_content, compiledHtml)
+                        webView.setTag(R.id.tag_webview_content, displayHtml)
                     }
                 },
                 modifier = Modifier.fillMaxSize()
             )
+            }
         }
     }
 }
@@ -1592,20 +1804,24 @@ fun compileHtmlWithTheme(html: String, theme: AppTheme): String {
         <head>
         <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
         <style>
+            * {
+                color: $txt !important;
+                background-color: transparent !important;
+            }
             body {
                 font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
                 line-height: 1.6;
                 padding: 16px;
                 margin: 0;
-                color: $txt;
-                background-color: $bg;
+                color: $txt !important;
+                background-color: $bg !important;
             }
-            h1 { font-size: 1.5em; margin-top: 4px; margin-bottom: 4px; color: $accent; font-weight: 700; }
-            h2 { font-size: 1.25em; margin-top: 24px; border-bottom: 1px solid $divider; padding-bottom: 6px; color: $accent; }
-            .subtitle { font-size: 0.85em; color: $muted; margin-bottom: 20px; font-style: italic; }
+            h1 { font-size: 1.5em; margin-top: 4px; margin-bottom: 4px; color: $accent !important; font-weight: 700; }
+            h2 { font-size: 1.25em; margin-top: 24px; border-bottom: 1px solid $divider; padding-bottom: 6px; color: $accent !important; }
+            .subtitle { font-size: 0.85em; color: $muted !important; margin-bottom: 20px; font-style: italic; }
             .info-box {
-                background-color: $surface;
-                border: 1px solid $divider;
+                background-color: $surface !important;
+                border: 1px solid $divider !important;
                 border-radius: 12px;
                 padding: 12px;
                 margin-top: 15px;
@@ -1613,16 +1829,16 @@ fun compileHtmlWithTheme(html: String, theme: AppTheme): String {
                 font-size: 0.9em;
             }
             .quote-card {
-                background-color: $surface;
-                border-left: 4px solid $accent;
+                background-color: $surface !important;
+                border-left: 4px solid $accent !important;
                 border-radius: 0 12px 12px 0;
                 padding: 12px;
                 margin: 16px 0;
             }
             blockquote { margin: 0; padding: 0; font-style: italic; }
-            .author { text-align: right; margin-top: 4px; font-weight: bold; font-size: 0.85em; color: $muted; }
+            .author { text-align: right; margin-top: 4px; font-weight: bold; font-size: 0.85em; color: $muted !important; }
             pre {
-                background-color: $surface;
+                background-color: $surface !important;
                 padding: 12px;
                 border-radius: 8px;
                 overflow-x: auto;
@@ -1631,19 +1847,19 @@ fun compileHtmlWithTheme(html: String, theme: AppTheme): String {
             }
             ul, ol { padding-left: 20px; }
             li { margin-bottom: 6px; }
-            table {
+            table, .infobox, .navbox, .metadata {
                 width: 100%;
                 border-collapse: collapse;
                 margin: 16px 0;
                 font-size: 0.9em;
             }
             th, td {
-                border: 1px solid $divider;
+                border: 1px solid $divider !important;
                 padding: 6px 10px;
                 text-align: left;
             }
-            th { background-color: $surface; }
-            a { color: $accent; text-decoration: none; }
+            th { background-color: $surface !important; }
+            a, a * { color: $accent !important; text-decoration: none; }
             a:hover { text-decoration: underline; }
         </style>
         </head>

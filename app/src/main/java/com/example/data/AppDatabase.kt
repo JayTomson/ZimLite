@@ -33,6 +33,9 @@ interface ArticleDao {
     @Query("SELECT * FROM articles WHERE archiveId = :archiveId")
     fun getArticlesByArchive(archiveId: String): Flow<List<ArticleEntity>>
 
+    @Query("SELECT * FROM articles WHERE title LIKE :query LIMIT 50")
+    fun searchArticlesByTitle(query: String): Flow<List<ArticleEntity>>
+
     // Search query that searches titles and contents
     @Query("SELECT * FROM articles WHERE title LIKE :query OR excerpt LIKE :query OR category LIKE :query")
     fun searchArticles(query: String): Flow<List<ArticleEntity>>

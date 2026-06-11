@@ -117,6 +117,10 @@ class DirectoryEntry(
 class DecompressedCluster(val data: ByteArray, val isExtended: Boolean)
 
 object ZimReader {
+    private val lastClusterLock = Any()
+    private var lastClusterOffsetCache: Long = -1L
+    private var lastClusterDataCache: DecompressedCluster? = null
+
 
     private fun readLEInt(source: ZimSource): Int {
         val b = ByteArray(4)
@@ -140,7 +144,7 @@ object ZimReader {
         return baos.toString("UTF-8")
     }
 
-    private fun openSource(context: Context, pathOrUri: String): ZimSource {
+    internal fun openSource(context: Context, pathOrUri: String): ZimSource {
         return if (pathOrUri.startsWith("content://") || pathOrUri.startsWith("file://")) {
             UriZimSource(context, Uri.parse(pathOrUri))
         } else {
@@ -243,8 +247,44 @@ object ZimReader {
         return Pair(clusterOffset, nextClusterOffset - clusterOffset)
     }
 
+    private fun getDecompressionStream(compressionType: Int, bais: ByteArrayInputStream, data: ByteArray): java.io.InputStream {
+        if (data.size >= 4) {
+            // Zstd magic: 0xFD2FB528 (Little Endian in bytes: 28 B5 2F FD)
+            if (data[0] == 0x28.toByte() && data[1] == 0xB5.toByte() && data[2] == 0x2F.toByte() && data[3] == 0xFD.toByte()) {
+                com.github.luben.zstd.util.Native.load()
+                return ZstdInputStream(bais)
+            }
+            
+            // XZ magic: FD 37 7A 58 5A 00
+            if (data[0] == 0xFD.toByte() && data[1] == 0x37.toByte() && data[2] == 0x7A.toByte() && data[3] == 0x58.toByte()) {
+                return org.tukaani.xz.XZInputStream(bais)
+            }
+            
+            // Zlib magic: 0x78 0x01, 0x78 0x9C, 0x78 0xDA
+            if (data[0] == 0x78.toByte() && (data[1] == 0x01.toByte() || data[1] == 0x9C.toByte() || data[1] == 0xDA.toByte())) {
+                return InflaterInputStream(bais)
+            }
+        }
+        
+        return when (compressionType) {
+            0, 1 -> bais // None / Legacy None
+            2 -> InflaterInputStream(bais)
+            4 -> org.tukaani.xz.XZInputStream(bais)
+            5 -> {
+                com.github.luben.zstd.util.Native.load()
+                ZstdInputStream(bais)
+            }
+            else -> throw IOException("Unsupported compression type: $compressionType")
+        }
+    }
+
     fun decompressCluster(source: ZimSource, clusterOffset: Long, clusterSize: Long): DecompressedCluster {
         if (clusterSize <= 0) return DecompressedCluster(ByteArray(0), false)
+        synchronized(lastClusterLock) {
+            if (lastClusterOffsetCache == clusterOffset && lastClusterDataCache != null) {
+                return lastClusterDataCache!!
+            }
+        }
         source.seek(clusterOffset)
         val compressionTypeByte = source.read()
         // Compression type is the lower 4 bits
@@ -261,22 +301,12 @@ object ZimReader {
         
         val bais = ByteArrayInputStream(compressedBytes)
         val decompressedStream = try {
-            when (compressionType) {
-                0, 1 -> bais // None / Legacy None
-                2 -> InflaterInputStream(bais) // Zlib/deflate
-                4 -> LZMA2InputStream(bais, 8192) // LZMA2
-                5 -> ZstdInputStream(bais) // Zstandard: primary in ZIM v5/v6
-                else -> {
-                    // Try Zstd as fallback if unknown, as it is most common in modern ZIMs
-                    try {
-                        ZstdInputStream(ByteArrayInputStream(compressedBytes))
-                    } catch (e: Exception) {
-                        bais
-                    }
-                }
-            }
+            getDecompressionStream(compressionType, bais, compressedBytes)
         } catch (t: Throwable) {
-            throw IOException("Error initializing decompression stream ($compressionType): ${t.message}", t)
+            val magic = if (compressedBytes.size >= 4) {
+                "%02x %02x %02x %02x".format(compressedBytes[0], compressedBytes[1], compressedBytes[2], compressedBytes[3])
+            } else "N/A"
+            throw IOException("Error initializing decompression stream ($compressionType), magic=[$magic]: ${t.message ?: t.toString()}", t)
         }
         
         val baos = ByteArrayOutputStream()
@@ -288,43 +318,57 @@ object ZimReader {
                 if (baos.size() > 180 * 1024 * 1024) throw IOException("Decompressed cluster too large")
             }
         } catch (t: Throwable) {
-            throw IOException("Error reading decompressed data: ${t.message}", t)
+            throw IOException("Error reading decompressed data ($compressionType): ${t.message ?: t.toString()}", t)
         } finally {
             try { decompressedStream.close() } catch (e: Exception) {}
         }
-        return DecompressedCluster(baos.toByteArray(), isExtended)
+        val clusterResult = DecompressedCluster(baos.toByteArray(), isExtended)
+        synchronized(lastClusterLock) {
+            lastClusterOffsetCache = clusterOffset
+            lastClusterDataCache = clusterResult
+        }
+        return clusterResult
     }
 
-    fun getHtmlForArticle(source: ZimSource, entry: DirectoryEntry, header: ZimHeader, depth: Int = 0): String {
-        if (depth > 10) return "" // Prevent infinite redirection
+    fun readMimeList(source: ZimSource, mimeListPos: Long): List<String> {
+        if (mimeListPos <= 0) return emptyList()
+        source.seek(mimeListPos)
+        val list = mutableListOf<String>()
+        while (true) {
+            val s = try { readNullTerminatedString(source) } catch (e: Exception) { "" }
+            if (s.isEmpty()) break
+            list.add(s)
+        }
+        return list
+    }
+
+    fun getBlobForEntry(source: ZimSource, entry: DirectoryEntry, header: ZimHeader, depth: Int = 0): ByteArray? {
+        if (depth > 10) return null
         if (entry.mimeType == 0xFFFF) {
             source.seek(header.urlPtrPos + entry.redirectIndex * 8L)
             val targetOffset = readLELong(source)
-            if (targetOffset < 0 || targetOffset > source.length()) return ""
+            if (targetOffset < 0 || targetOffset > source.length()) return null
             val targetEntry = readDirectoryEntry(source, targetOffset)
-            return getHtmlForArticle(source, targetEntry, header, depth + 1)
+            return getBlobForEntry(source, targetEntry, header, depth + 1)
         }
         
-        if (entry.clusterNumber < 0 || entry.blobNumber < 0 || entry.clusterNumber >= header.clusterCount) return ""
+        if (entry.clusterNumber < 0 || entry.blobNumber < 0 || entry.clusterNumber >= header.clusterCount) return null
         
         val fileSize = source.length()
         val (clusterOffset, clusterSize) = getClusterOffsetAndSize(source, header, entry.clusterNumber, fileSize)
         
-        if (clusterOffset < 0 || clusterOffset + clusterSize > fileSize) return ""
+        if (clusterOffset < 0 || clusterOffset + clusterSize > fileSize) return null
         
-        val cluster = decompressCluster(source, clusterOffset, clusterSize)
+        val cluster = try { decompressCluster(source, clusterOffset, clusterSize) } catch (e: Exception) { DecompressedCluster(ByteArray(0), false) }
         val clusterBytes = cluster.data
         
-        if (clusterBytes.size < 4) return ""
+        if (clusterBytes.size < 4) return null
         
         val buf = ByteBuffer.wrap(clusterBytes).order(ByteOrder.LITTLE_ENDIAN)
-        
         val offsetSize = if (cluster.isExtended) 8 else 4
         
-        // Read start and end offsets of the blob
         val startOff: Int
         val endOff: Int
-        
         try {
             if (cluster.isExtended) {
                 startOff = buf.getLong(entry.blobNumber * 8).toInt()
@@ -333,25 +377,180 @@ object ZimReader {
                 startOff = buf.getInt(entry.blobNumber * 4)
                 endOff = buf.getInt((entry.blobNumber + 1) * 4)
             }
-        } catch (e: Exception) {
-            return ""
-        }
+        } catch (e: Exception) { return null }
         
         val size = endOff - startOff
+        if (size <= 0 || startOff < 0 || startOff + size > clusterBytes.size) return null
         
-        if (size <= 0 || startOff < 0 || startOff + size > clusterBytes.size) return ""
+        val result = ByteArray(size)
+        System.arraycopy(clusterBytes, startOff, result, 0, size)
+        return result
+    }
+
+    fun getBlobByUrl(context: Context, pathOrUri: String, targetUrl: String): Pair<ByteArray, String>? {
+        try {
+            openSource(context, pathOrUri).use { source ->
+                val header = try { readHeader(source) } catch (e: Exception) { return null }
+                val mimes = readMimeList(source, header.mimeListPos)
+                
+                val searchKeys = LinkedHashSet<String>()
+                searchKeys.add(targetUrl)
+                
+                val cleanUrl = if (targetUrl.contains("/")) targetUrl.substring(targetUrl.indexOf('/') + 1) else targetUrl
+                val cleanUrlUnderscore = cleanUrl.replace(" ", "_")
+                
+                // Add variants similar to getHtmlByUrl
+                searchKeys.add("A/$cleanUrl")
+                searchKeys.add("a/$cleanUrl")
+                searchKeys.add("A/$cleanUrlUnderscore")
+                searchKeys.add("a/$cleanUrlUnderscore")
+                searchKeys.add(targetUrl.replace(" ", "_"))
+
+                if (targetUrl.startsWith("C/", true)) {
+                    searchKeys.add("C/$cleanUrlUnderscore")
+                    searchKeys.add("c/$cleanUrlUnderscore")
+                }
+                
+                // Other common namespaces as fallback
+                for (ns in listOf("I", "i", "S", "s", "J", "j", "m", "M", "-", "")) {
+                    if (ns == "A" || ns == "a") continue // already added
+                    if (ns.isEmpty()) {
+                        searchKeys.add(cleanUrl)
+                        searchKeys.add(cleanUrlUnderscore)
+                    } else {
+                        searchKeys.add("$ns/$cleanUrl")
+                        searchKeys.add("$ns/$cleanUrlUnderscore")
+                    }
+                }
+                
+                for (key in searchKeys) {
+                    var low = 0
+                    var high = header.articleCount - 1
+                    while (low <= high) {
+                        val mid = (low + high) ushr 1
+                        source.seek(header.urlPtrPos + mid * 8L)
+                        val entryOffset = readLELong(source)
+                        val entry = readDirectoryEntry(source, entryOffset)
+                        val entryFullPath = "${entry.namespace}/${entry.url}"
+                        val comp = entryFullPath.compareTo(key)
+                        
+                        if (comp == 0) {
+                            val data = getBlobForEntry(source, entry, header)
+                            if (data != null) {
+                                val mime = mimes.getOrElse(entry.mimeType) { "application/octet-stream" }
+                                return Pair(data, mime)
+                            }
+                        }
+                        if (comp < 0) low = mid + 1 else high = mid - 1
+                    }
+                    
+                    // Fallback case-insensitive
+                    low = 0
+                    high = header.articleCount - 1
+                    while (low <= high) {
+                        val mid = (low + high) ushr 1
+                        source.seek(header.urlPtrPos + mid * 8L)
+                        val entryOffset = readLELong(source)
+                        val entry = readDirectoryEntry(source, entryOffset)
+                        val entryFullPath = "${entry.namespace}/${entry.url}"
+                        val comp = entryFullPath.compareTo(key, ignoreCase = true)
+                        if (comp == 0) {
+                            val data = getBlobForEntry(source, entry, header)
+                            if (data != null) {
+                                val mime = mimes.getOrElse(entry.mimeType) { "application/octet-stream" }
+                                return Pair(data, mime)
+                            }
+                            break
+                        }
+                        if (comp < 0) low = mid + 1 else high = mid - 1
+                    }
+                }
+            }
+        } catch (e: Throwable) {
+            Log.e("ZimReader", "getBlobByUrl failed: $targetUrl", e)
+        }
+        return null
+    }
+
+    fun getHtmlForArticle(source: ZimSource, entry: DirectoryEntry, header: ZimHeader, depth: Int = 0): String {
+        if (depth > 10) return "<h3>Ошибка: Слишком много перенаправлений (цикл)</h3>"
+        if (entry.mimeType == 0xFFFF) {
+            source.seek(header.urlPtrPos + entry.redirectIndex * 8L)
+            val targetOffset = try { readLELong(source) } catch (e: Exception) { -1L }
+            if (targetOffset < 0 || targetOffset > source.length()) return "<h3>Ошибка: Некорректный адрес перенаправления</h3>"
+            val targetEntry = try { readDirectoryEntry(source, targetOffset) } catch (e: Exception) { null }
+            if (targetEntry == null) return "<h3>Ошибка: Не удалось прочитать запись перенаправления</h3>"
+            return getHtmlForArticle(source, targetEntry, header, depth + 1)
+        }
         
-        return try {
-            String(clusterBytes, startOff, size, Charsets.UTF_8)
+        if (entry.clusterNumber < 0 || entry.blobNumber < 0 || entry.clusterNumber >= header.clusterCount) {
+            return "<h3>Ошибка: Недопустимый индекс данных в архиве</h3>" +
+                    "<p>Кластер: ${entry.clusterNumber}, Блоб: ${entry.blobNumber}</p>"
+        }
+        
+        val fileSize = source.length()
+        val (clusterOffset, clusterSize) = try {
+            getClusterOffsetAndSize(source, header, entry.clusterNumber, fileSize)
         } catch (e: Exception) {
-            ""
+            return "<h3>Ошибка: Не удалось определить положение данных (кластера)</h3><p>${e.message}</p>"
+        }
+        
+        if (clusterOffset < 0 || clusterOffset + clusterSize > fileSize) {
+            return "<h3>Ошибка: Данные выходят за границы файла</h3>" +
+                    "<p>Смещение: $clusterOffset, Размер: $clusterSize, Размер файла: $fileSize</p>"
+        }
+        
+        val clusterBytes: ByteArray
+        try {
+            val cluster = decompressCluster(source, clusterOffset, clusterSize)
+            clusterBytes = cluster.data
+            
+            if (clusterBytes.size < 4) return "<h3>Ошибка: Извлеченные данные пусты или повреждены</h3>"
+            
+            val buf = ByteBuffer.wrap(clusterBytes).order(ByteOrder.LITTLE_ENDIAN)
+            
+            val offsetSize = if (cluster.isExtended) 8 else 4
+            
+            // Read start and end offsets of the blob
+            val startOff: Int
+            val endOff: Int
+            
+            try {
+                if (cluster.isExtended) {
+                    startOff = buf.getLong(entry.blobNumber * 8).toInt()
+                    endOff = buf.getLong((entry.blobNumber + 1) * 8).toInt()
+                } else {
+                    startOff = buf.getInt(entry.blobNumber * 4)
+                    endOff = buf.getInt((entry.blobNumber + 1) * 4)
+                }
+            } catch (e: Exception) {
+                return "<h3>Ошибка чтения таблицы смещений внутри кластера</h3><p>Блоб: ${entry.blobNumber}, Ошибка: ${e.message}</p>"
+            }
+            
+            val size = endOff - startOff
+            
+            if (size <= 0 || startOff < 0 || startOff + size > clusterBytes.size) {
+                return "<h3>Ошибка: Смещение блоба за пределами кластера</h3>" +
+                        "<p>Старт: $startOff, Размер: $size, Размер кластера: ${clusterBytes.size}</p>"
+            }
+            
+            return try {
+                String(clusterBytes, startOff, size, Charsets.UTF_8)
+            } catch (e: Exception) {
+                "<h3>Ошибка декодирования содержимого (UTF-8)</h3><p>${e.message}</p>"
+            }
+        } catch (e: Throwable) {
+            return "<h3>Ошибка распаковки кластера</h3><p>${e.message}</p>"
         }
     }
 
     fun getHtmlByUrl(context: Context, pathOrUri: String, targetUrl: String): String {
+        val errorLog = mutableListOf<String>()
         try {
             openSource(context, pathOrUri).use { source ->
-                val header = readHeader(source)
+                val header = try { readHeader(source) } catch (e: Exception) {
+                    return "<h3>Ошибка чтения заголовка ZIM</h3><p>${e.message}</p>"
+                }
                 
                 // We'll prepare multiple possible target search keys to make it extremely robust.
                 val searchKeys = LinkedHashSet<String>()
@@ -359,10 +558,20 @@ object ZimReader {
                 
                 // Extract clean URL (without namespace)
                 val cleanUrl = if (targetUrl.contains("/")) targetUrl.substring(targetUrl.indexOf('/') + 1) else targetUrl
+                val cleanUrlUnderscore = cleanUrl.replace(" ", "_")
                 
                 // Add common variants
                 searchKeys.add("A/$cleanUrl")
                 searchKeys.add("a/$cleanUrl")
+                searchKeys.add("A/$cleanUrlUnderscore")
+                searchKeys.add("a/$cleanUrlUnderscore")
+                searchKeys.add(targetUrl.replace(" ", "_"))
+                
+                // Support category namespace specifically
+                if (targetUrl.startsWith("C/", true)) {
+                    searchKeys.add("C/$cleanUrlUnderscore")
+                    searchKeys.add("c/$cleanUrlUnderscore")
+                }
                 
                 for (key in searchKeys) {
                     var low = 0
@@ -375,16 +584,39 @@ object ZimReader {
                         val entry = readDirectoryEntry(source, entryOffset)
                         
                         val entryFullPath = "${entry.namespace}/${entry.url}"
-                        val comp = entryFullPath.compareTo(key, ignoreCase = true)
+                        // Use case-sensitive comparison first as ZIM index is sorted that way
+                        val comp = entryFullPath.compareTo(key)
                         
+                        if (comp == 0) {
+                            val html = getHtmlForArticle(source, entry, header)
+                            if (html.isNotEmpty() && !html.contains("Ошибка:")) return html
+                            errorLog.add("Найдена запись по ключу '$key', но контент пуст или поврежден: $html")
+                        }
                         if (comp < 0) {
                             low = mid + 1
-                        } else if (comp > 0) {
-                            high = mid - 1
                         } else {
-                            val html = getHtmlForArticle(source, entry, header)
-                            if (html.isNotEmpty()) return html
+                            high = mid - 1
                         }
+                    }
+                    
+                    // Fallback: Case-insensitive search if case-sensitive failed (some ZIMs might be weird)
+                    low = 0
+                    high = header.articleCount - 1
+                    while (low <= high) {
+                        val mid = (low + high) ushr 1
+                        source.seek(header.urlPtrPos + mid * 8L)
+                        val entryOffset = try { readLELong(source) } catch (e: Exception) { -1L }
+                        if (entryOffset == -1L) { low = mid + 1; continue }
+                        val entry = readDirectoryEntry(source, entryOffset)
+                        val entryFullPath = "${entry.namespace}/${entry.url}"
+                        val comp = entryFullPath.compareTo(key, ignoreCase = true)
+                        if (comp == 0) {
+                            val html = getHtmlForArticle(source, entry, header)
+                            if (html.isNotEmpty() && !html.contains("Ошибка:")) return html
+                            errorLog.add("Найдена запись (insensitive) по ключу '$key', но контент пуст: $html")
+                            break // Success or at least found the entry
+                        }
+                        if (comp < 0) low = mid + 1 else high = mid - 1
                     }
                 }
                 
@@ -394,7 +626,8 @@ object ZimReader {
                 while (low <= high) {
                     val mid = (low + high) ushr 1
                     source.seek(header.urlPtrPos + mid * 8L)
-                    val entryOffset = readLELong(source)
+                    val entryOffset = try { readLELong(source) } catch (e: Exception) { -1L }
+                    if (entryOffset == -1L) { low = mid + 1; continue }
                     val entry = readDirectoryEntry(source, entryOffset)
                     
                     val comp = entry.url.compareTo(cleanUrl, ignoreCase = true)
@@ -404,30 +637,27 @@ object ZimReader {
                         high = mid - 1
                     } else {
                         val html = getHtmlForArticle(source, entry, header)
-                        if (html.isNotEmpty()) return html
-                    }
-                }
-                
-                // Ultimate linear scan backup for small archives
-                if (header.articleCount < 5000) {
-                    for (i in 0 until header.articleCount) {
-                        source.seek(header.urlPtrPos + i * 8L)
-                        val entryOffset = try { readLELong(source) } catch (e: Throwable) { continue }
-                        val entry = try { readDirectoryEntry(source, entryOffset) } catch (e: Throwable) { continue }
-                        val rawUrl = entry.url
-                        
-                        val cleanRawUrl = if (rawUrl.contains("/")) rawUrl.substring(rawUrl.indexOf('/') + 1) else rawUrl
-                        if (cleanRawUrl.equals(cleanUrl, ignoreCase = true)) {
-                            val html = getHtmlForArticle(source, entry, header)
-                            if (html.isNotEmpty()) return html
-                        }
+                        if (html.isNotEmpty() && !html.contains("Ошибка:")) return html
+                        errorLog.add("Найдена запись (exact URL) по '${entry.url}', но контент пуст: $html")
+                        break
                     }
                 }
             }
         } catch (e: Throwable) {
             Log.e("ZimReader", "getHtmlByUrl failed for url=$targetUrl in $pathOrUri", e)
+            return "<h3>Критическая ошибка чтения</h3><p>${e.message}</p>"
         }
-        return ""
+        
+        return buildString {
+            append("<h3>Статья не найдена</h3>")
+            append("<p>Не удалось найти ресурс: <b>$targetUrl</b></p>")
+            if (errorLog.isNotEmpty()) {
+                append("<p>Журнал попыток:</p><ul>")
+                errorLog.forEach { append("<li>$it</li>") }
+                append("</ul>")
+            }
+            append("<p>Возможные причины: ресурс отсутствует в данном архиве или указан неверный путь.</p>")
+        }
     }
 
     fun searchArticlesInZim(context: Context, pathOrUri: String, query: String, archiveId: String, archiveTitle: String, limit: Int = 40): List<ArticleEntity> {
@@ -470,7 +700,11 @@ object ZimReader {
                     val entry = readDirectoryEntry(source, entryOffset)
                     i++
                     
-                    if (entry.namespace == 'A' && entry.mimeType != 0xFFFF && entry.title.isNotEmpty()) {
+                    val isSupportedNamespace = entry.namespace == 'A' || entry.namespace == 'a' || 
+                            entry.namespace == 'C' || entry.namespace == 'c' || 
+                            entry.namespace == '\u0000' || entry.namespace == '-' || entry.namespace == ' '
+                    
+                    if (isSupportedNamespace && entry.mimeType != 0xFFFF && entry.title.isNotEmpty()) {
                         val titleLower = entry.title.lowercase()
                         val urlLower = entry.url.lowercase()
                         
@@ -483,8 +717,8 @@ object ZimReader {
                                     archiveTitle = archiveTitle,
                                     url = correctUrl,
                                     title = entry.title,
-                                    category = "Статья",
-                                    excerpt = "Статья по запросу из $archiveTitle",
+                                    category = if (entry.namespace == 'C' || entry.namespace == 'c') "Категория" else "Статья",
+                                    excerpt = "Найдено в $archiveTitle",
                                     htmlContent = "",
                                     isFeedCandidate = false
                                 )
@@ -503,7 +737,11 @@ object ZimReader {
                         val entry = readDirectoryEntry(source, entryOffset)
                         j--
                         
-                        if (entry.namespace == 'A' && entry.mimeType != 0xFFFF && entry.title.isNotEmpty()) {
+                        val isSupportedNamespace = entry.namespace == 'A' || entry.namespace == 'a' || 
+                                entry.namespace == 'C' || entry.namespace == 'c' || 
+                                entry.namespace == '\u0000' || entry.namespace == '-' || entry.namespace == ' '
+                        
+                        if (isSupportedNamespace && entry.mimeType != 0xFFFF && entry.title.isNotEmpty()) {
                             val titleLower = entry.title.lowercase()
                             val urlLower = entry.url.lowercase()
                             
@@ -516,8 +754,8 @@ object ZimReader {
                                         archiveTitle = archiveTitle,
                                         url = correctUrl,
                                         title = entry.title,
-                                        category = "Статья",
-                                        excerpt = "Статья по запросу из $archiveTitle",
+                                        category = if (entry.namespace == 'C' || entry.namespace == 'c') "Категория" else "Статья",
+                                        excerpt = "Найдено в $archiveTitle",
                                         htmlContent = "",
                                         isFeedCandidate = false
                                     )
@@ -556,7 +794,9 @@ object ZimReader {
                     val entry = readDirectoryEntry(source, entryOffset)
                     index++
                     
-                    val isArticleNamespace = entry.namespace == 'A' || entry.namespace == 'a'
+                    val isSupportedNamespace = entry.namespace == 'A' || entry.namespace == 'a' || 
+                            entry.namespace == 'C' || entry.namespace == 'c' || 
+                            entry.namespace == '\u0000' || entry.namespace == '-' || entry.namespace == ' '
                     val isNotRedirect = entry.mimeType != 0xFFFF
                     val isOkTitle = entry.title.isNotEmpty() &&
                             !entry.title.startsWith("Category:") &&
@@ -569,7 +809,7 @@ object ZimReader {
                             !entry.title.startsWith("Portal:") &&
                             !entry.title.startsWith("Портал:")
                     
-                    if (isArticleNamespace && isNotRedirect && isOkTitle) {
+                    if (isSupportedNamespace && isNotRedirect && isOkTitle) {
                         val correctUrl = "${entry.namespace}/${entry.url}"
                         result.add(
                             ArticleEntity(
@@ -578,8 +818,8 @@ object ZimReader {
                                 archiveTitle = archiveTitle,
                                 url = correctUrl,
                                 title = entry.title,
-                                category = "Статья",
-                                excerpt = "Откройте для чтения статью из $archiveTitle",
+                                category = if (entry.namespace == 'C' || entry.namespace == 'c') "Категория" else "Статья",
+                                excerpt = "Откройте для чтения из $archiveTitle",
                                 htmlContent = "",
                                 isFeedCandidate = true
                             )
@@ -613,7 +853,7 @@ object ZimReader {
                 val batch = ArrayList<ArticleEntity>(batchSize)
                 
                 // Dynamic decision on whether to extract excerpts during indexing to prevent severe disk IO thrashing on massive ZIMs
-                val shouldExtractExcerpts = total <= 30000
+                val shouldExtractExcerpts = true // total <= 30000
 
                 for (i in 0 until total) {
                     if (i % 1000 == 0) {
