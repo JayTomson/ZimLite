@@ -30,7 +30,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val appTheme = MutableStateFlow(AppTheme.DARK)
     val useOriginalHtml = MutableStateFlow(true)
     val searchInContent = MutableStateFlow(true)
-    val deepIndexing = MutableStateFlow(false)
+    val deepIndexing = MutableStateFlow(true)
     val customZimDirPath = MutableStateFlow<String?>(null)
 
     // Navigation and screen state
@@ -425,15 +425,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 batchSize = 1000,
                 extractExcerpts = deepIndexing.value,
                 onBatch = { batch ->
-                    articleDao.insertArticles(batch)
                     val ftsBatch = batch.map {
                         ArticleFts(
                             articleId = it.id,
                             title = it.title,
                             excerpt = it.excerpt,
+                            fullText = it.htmlContent, // Content for searching
                             archiveId = it.archiveId
                         )
                     }
+                    // Clear plain text from main table to save space; it's re-read from ZIM on demand
+                    val cleanBatch = batch.map { it.copy(htmlContent = "") }
+                    articleDao.insertArticles(cleanBatch)
                     articleDao.insertArticlesFts(ftsBatch)
                     totalArticleCount += batch.size
                 },
@@ -463,6 +466,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     articleId = it.id,
                     title = it.title,
                     excerpt = it.excerpt,
+                    fullText = it.excerpt, // Use excerpt for preloaded data
                     archiveId = it.archiveId
                 )
             }

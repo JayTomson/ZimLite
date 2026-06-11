@@ -900,9 +900,11 @@ object ZimReader {
                     if (!isOkTitle) continue
 
                     // Читаем короткий excerpt (~150 символов) если база небольшая, иначе берем быстрый шаблон
+                    var fullContent = ""
                     val excerpt = if (shouldExtractExcerpts) {
                         try {
-                            extractExcerpt(source, entry, header, maxChars = 150)
+                            fullContent = extractFullText(source, entry, header)
+                            if (fullContent.length > 150) fullContent.take(150) + "…" else fullContent
                         } catch (e: Exception) {
                             ""
                         }
@@ -921,7 +923,7 @@ object ZimReader {
                             title = entry.title,
                             category = "Статья",
                             excerpt = excerpt.ifBlank { "Статья из архива: ${entry.title}" },
-                            htmlContent = "", // HTML грузится лениво при открытии
+                            htmlContent = fullContent, // Текст для индексации (если shouldExtractExcerpts)
                             isFeedCandidate = true
                         )
                     )
@@ -941,6 +943,35 @@ object ZimReader {
             }
         } catch (e: Throwable) {
             e.printStackTrace()
+        }
+    }
+
+    /**
+     * Читает HTML-контент статьи и переводит его в чистый текст для индексации.
+     */
+    private fun extractFullText(
+        source: ZimSource,
+        entry: DirectoryEntry,
+        header: ZimHeader,
+        limit: Int = 100000 // До 100к символов для индексации
+    ): String {
+        if (entry.clusterNumber < 0 || entry.blobNumber < 0) return ""
+
+        val html = try {
+            getHtmlForArticle(source, entry, header)
+        } catch (t: Throwable) {
+            ""
+        }
+        if (html.isEmpty()) return ""
+
+        return try {
+            val text = android.text.Html.fromHtml(html, android.text.Html.FROM_HTML_MODE_LEGACY)
+                .toString()
+                .replace(Regex("\\s+"), " ")
+                .trim()
+            if (text.length > limit) text.take(limit) else text
+        } catch (t: Throwable) {
+            ""
         }
     }
 

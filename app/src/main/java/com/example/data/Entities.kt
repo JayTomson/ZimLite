@@ -38,6 +38,7 @@ data class ArticleFts(
     val articleId: String,
     val title: String,
     val excerpt: String,
+    val fullText: String, // Field for searching through the entire article content
     val archiveId: String
 )
 

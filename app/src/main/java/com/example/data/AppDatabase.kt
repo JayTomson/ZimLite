@@ -108,7 +108,7 @@ interface BookmarkDao {
     suspend fun deleteBookmarkById(id: String)
 }
 
-@Database(entities = [ArchiveEntity::class, ArticleEntity::class, ArticleFts::class, BookmarkEntity::class], version = 4, exportSchema = false)
+@Database(entities = [ArchiveEntity::class, ArticleEntity::class, ArticleFts::class, BookmarkEntity::class], version = 5, exportSchema = false)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun archiveDao(): ArchiveDao
     abstract fun articleDao(): ArticleDao
