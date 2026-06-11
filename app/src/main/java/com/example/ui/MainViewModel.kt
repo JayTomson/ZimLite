@@ -47,12 +47,36 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     
     // Dynamically filtered articles based on search query (returns empty list instantly if query is empty)
     val searchedArticles: StateFlow<List<ArticleEntity>> = searchQuery
-        .debounce(150)
+        .debounce(250)
         .flatMapLatest { query ->
-            if (query.trim().isEmpty()) {
+            val cleanQuery = query.trim()
+            if (cleanQuery.isEmpty()) {
                 flowOf(emptyList())
             } else {
-                articleDao.searchArticles("%$query%")
+                flow {
+                    val dbMatches = articleDao.searchArticles("%$cleanQuery%").first()
+                    emit(dbMatches)
+                    
+                    val activeArchives = archiveDao.getAllArchives().first()
+                    val allResults = dbMatches.toMutableList()
+                    val existingIds = dbMatches.map { it.id }.toSet()
+                    
+                    withContext(Dispatchers.IO) {
+                        for (archive in activeArchives) {
+                            try {
+                                val zimMatches = ZimReader.searchArticlesInZim(getApplication(), archive.filePath, cleanQuery, archive.id, archive.title)
+                                for (match in zimMatches) {
+                                    if (!existingIds.contains(match.id)) {
+                                        allResults.add(match)
+                                    }
+                                }
+                            } catch (e: Exception) {
+                                e.printStackTrace()
+                            }
+                        }
+                    }
+                    emit(allResults.toList())
+                }
             }
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
@@ -102,11 +126,44 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun selectArticle(article: ArticleEntity) {
+        viewModelScope.launch {
+            if (article.htmlContent.isNotEmpty()) {
+                activeArticle.value = article
+                return@launch
+            }
+            isIndexing.value = true
+            val loadedArticle = withContext(Dispatchers.IO) {
+                try {
+                    val archive = archiveDao.getArchiveById(article.archiveId)
+                    if (archive != null) {
+                        val html = ZimReader.getHtmlByUrl(getApplication(), archive.filePath, article.url)
+                        if (html.isNotEmpty()) {
+                            article.copy(htmlContent = html)
+                        } else {
+                            article.copy(htmlContent = "<h3>Ошибка: Не удалось прочитать содержимое статьи из архива</h3>")
+                        }
+                    } else {
+                        article.copy(htmlContent = "<h3>Ошибка: Сбой поиска архива</h3>")
+                    }
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                    article.copy(htmlContent = "<h3>Ошибка при чтении статьи: ${e.localizedMessage ?: e.message}</h3>")
+                }
+            }
+            isIndexing.value = false
+            activeArticle.value = loadedArticle
+        }
+    }
+
     fun refreshFeed() {
         viewModelScope.launch {
             try {
                 // Use first() to take only a single state emission to avoid leaking coroutines
-                val randomList = articleDao.getRandomFeedArticles(15).first()
+                var randomList = articleDao.getRandomFeedArticles(15).first()
+                if (randomList.isEmpty()) {
+                    randomList = articleDao.getAllArticles().first().shuffled().take(15)
+                }
                 _feedArticles.value = randomList
             } catch (e: Exception) {
                 e.printStackTrace()
@@ -208,8 +265,35 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
             
-            // 1. Get the beautiful preloaded articles
-            val articlesToInsert = PreloadedData.getPreloadedArticlesForArchive(archiveId)
+            val isRealZim = try {
+                if (file.exists() && file.length() > 1024 * 1024) {
+                    FileZimSource(file).use { pSource ->
+                        val header = ZimReader.readHeader(pSource)
+                        header.magic == 1113824004 || header.magic == 72173914
+                    }
+                } else false
+            } catch (e: Exception) {
+                false
+            }
+
+            val articlesToInsert = if (isRealZim) {
+                try {
+                    val list = FileZimSource(file).use { pSource ->
+                        val header = ZimReader.readHeader(pSource)
+                        ZimReader.getRandomArticlesForFeed(getApplication(), file.absolutePath, header, archiveId, archiveTitle, 200)
+                    }
+                    if (list.isNotEmpty()) {
+                        list
+                    } else {
+                        PreloadedData.getPreloadedArticlesForArchive(archiveId)
+                    }
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                    PreloadedData.getPreloadedArticlesForArchive(archiveId)
+                }
+            } else {
+                PreloadedData.getPreloadedArticlesForArchive(archiveId)
+            }
             
             // 2. Clear old articles if any and insert new articles
             articleDao.deleteArticlesByArchive(archiveId)
@@ -244,19 +328,65 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             isIndexing.value = true
             
             withContext(Dispatchers.IO) {
-                // Determine preloaded set to use as index fallback
-                val presetToUse = if (cleanName.contains("quote", ignoreCase = true) || cleanName.contains("цитат", ignoreCase = true)) {
-                    "wikiquote"
-                } else {
-                    "wikipedia"
+                val isRealZim = try {
+                    UriZimSource(context, uri).use { pSource ->
+                        val header = ZimReader.readHeader(pSource)
+                        header.magic == 1113824004 || header.magic == 72173914
+                    }
+                } catch (e: Exception) {
+                    false
                 }
-                
-                val articlesToInsert = PreloadedData.getPreloadedArticlesForArchive(presetToUse).map { article ->
-                    article.copy(
-                        id = "${id}_${article.id.substringAfter("_")}",
-                        archiveId = id,
-                        archiveTitle = "Файл: $cleanName"
-                    )
+
+                val articlesToInsert = if (isRealZim) {
+                    try {
+                        val list = UriZimSource(context, uri).use { pSource ->
+                            val header = ZimReader.readHeader(pSource)
+                            ZimReader.getRandomArticlesForFeed(context, uri.toString(), header, id, "Файл: $cleanName", 200)
+                        }
+                        if (list.isNotEmpty()) {
+                            list
+                        } else {
+                            val presetToUse = if (cleanName.contains("quote", ignoreCase = true) || cleanName.contains("цитат", ignoreCase = true)) {
+                                "wikiquote"
+                            } else {
+                                "wikipedia"
+                            }
+                            PreloadedData.getPreloadedArticlesForArchive(presetToUse).map { article ->
+                                article.copy(
+                                    id = "${id}_${article.id.substringAfter("_")}",
+                                    archiveId = id,
+                                    archiveTitle = "Файл: $cleanName"
+                                )
+                            }
+                        }
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                        val presetToUse = if (cleanName.contains("quote", ignoreCase = true) || cleanName.contains("цитат", ignoreCase = true)) {
+                            "wikiquote"
+                        } else {
+                            "wikipedia"
+                        }
+                        PreloadedData.getPreloadedArticlesForArchive(presetToUse).map { article ->
+                            article.copy(
+                                id = "${id}_${article.id.substringAfter("_")}",
+                                archiveId = id,
+                                archiveTitle = "Файл: $cleanName"
+                            )
+                        }
+                    }
+                } else {
+                    val presetToUse = if (cleanName.contains("quote", ignoreCase = true) || cleanName.contains("цитат", ignoreCase = true)) {
+                        "wikiquote"
+                    } else {
+                        "wikipedia"
+                    }
+                    PreloadedData.getPreloadedArticlesForArchive(presetToUse).map { article ->
+                        article.copy(
+                            id = "${id}_${article.id.substringAfter("_")}",
+                            archiveId = id,
+                            archiveTitle = "Файл: $cleanName"
+                        )
+                    }
                 }
                 
                 articleDao.insertArticles(articlesToInsert)

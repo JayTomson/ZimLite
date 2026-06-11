@@ -519,7 +519,7 @@ fun FeedScreen(viewModel: MainViewModel) {
                     FeedCard(
                         article = article,
                         viewModel = viewModel,
-                        onClick = { viewModel.activeArticle.value = article }
+                        onClick = { viewModel.selectArticle(article) }
                     )
                 }
             }
@@ -687,7 +687,7 @@ fun SearchScreen(viewModel: MainViewModel) {
             ) {
                 items(searchedArticles) { article ->
                     SearchCard(article = article, viewModel = viewModel) {
-                        viewModel.activeArticle.value = article
+                        viewModel.selectArticle(article)
                     }
                 }
             }
@@ -832,7 +832,7 @@ fun BookmarksScreen(viewModel: MainViewModel) {
                     )
 
                     SearchCard(article = articleFromBookmark, viewModel = viewModel) {
-                        viewModel.activeArticle.value = articleFromBookmark
+                        viewModel.selectArticle(articleFromBookmark)
                     }
                 }
             }
