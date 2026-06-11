@@ -1544,13 +1544,17 @@ fun ArticleReaderScreen(
                     }
                 },
                 update = { webView ->
-                    webView.loadDataWithBaseURL(
-                        "zim://local/",
-                        compiledHtml,
-                        "text/html",
-                        "UTF-8",
-                        null
-                    )
+                    val currentContent = webView.getTag(R.id.tag_webview_content) as? String
+                    if (currentContent != compiledHtml) {
+                        webView.loadDataWithBaseURL(
+                            "zim://local/",
+                            compiledHtml,
+                            "text/html",
+                            "UTF-8",
+                            null
+                        )
+                        webView.setTag(R.id.tag_webview_content, compiledHtml)
+                    }
                 },
                 modifier = Modifier.fillMaxSize()
             )

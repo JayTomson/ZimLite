@@ -146,93 +146,74 @@ object ZimReader {
     }
 
     fun readHeader(source: ZimSource): ZimHeader {
-        source.seek(0)
-        val bytes = ByteArray(72)
-        source.readFully(bytes)
-        val buf = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
-        
-        val magic = buf.getInt()          // 0-4
-        val version = buf.getInt()        // 4-8
-        val uuid = ByteArray(16)
-        buf.get(uuid)                     // 8-24
-        val articleCount = buf.getInt()   // 24-28
-        val clusterCount = buf.getInt()   // 28-32
-        val urlPtrPos = buf.getLong()     // 32-40
-        val titlePtrPos = buf.getLong()   // 40-48
-        val clusterPtrPos = buf.getLong() // 48-56
-        val mimeListPos = buf.getLong()   // 56-64
-        val mainPage = buf.getInt()       // 64-68
-        val layoutPage = buf.getInt()     // 68-72
-        
-        return ZimHeader(
-            magic = magic,
-            version = version,
-            uuid = uuid,
-            articleCount = articleCount,
-            clusterCount = clusterCount,
-            urlPtrPos = urlPtrPos,
-            titlePtrPos = titlePtrPos,
-            clusterPtrPos = clusterPtrPos,
-            mimeListPos = mimeListPos,
-            mainPage = mainPage,
-            layoutPage = layoutPage
-        )
-    }
-
-    fun getUrlOffset(source: ZimSource, entryOffset: Long, namespaceChar: Char): Int {
         try {
-            // Modern ZIM v6 almost always has a 4-byte revision field.
-            // We search for the namespace character at offset 4 or 8 to decide.
-            source.seek(entryOffset + 4)
-            val b4 = source.read()
-            val b5 = source.read()
+            source.seek(0)
+            if (source.length() < 80) throw IOException("ZIM file too small")
+            val bytes = ByteArray(80)
+            source.readFully(bytes)
+            val buf = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
             
-            source.seek(entryOffset + 8)
-            val b8 = source.read()
-            val b9 = source.read()
-
-            // If we see "X/" where X is the namespace, we're very confident
-            if (b4 == namespaceChar.code && b5 == '/'.code) return 4
-            if (b8 == namespaceChar.code && b9 == '/'.code) return 8
-
-            // Match only namespace char (could be "XArticleTitle")
-            if (b4 == namespaceChar.code) return 4
-            if (b8 == namespaceChar.code) return 8
-
-            // Printable ASCII or UTF-8 start at offset 4 suggests no revision
-            if (b4 in 0x20..0x7E || b4 >= 0xC0) return 4
-        } catch (e: Exception) {
-            e.printStackTrace()
+            val magic = buf.getInt()           // 0-3
+            val versionMajor = buf.getShort()  // 4-5
+            val versionMinor = buf.getShort()  // 6-7
+            val uuid = ByteArray(16)
+            buf.get(uuid)                      // 8-23
+            val articleCount = buf.getInt()    // 24-27
+            val clusterCount = buf.getInt()    // 28-31
+            val urlPtrPos = buf.getLong()      // 32-39
+            val titlePtrPos = buf.getLong()    // 40-47
+            val clusterPtrPos = buf.getLong()  // 48-55
+            val mimeListPos = buf.getLong()    // 56-63
+            val mainPage = buf.getInt()        // 64-67
+            val layoutPage = buf.getInt()      // 68-71
+            
+            return ZimHeader(
+                magic = magic,
+                version = ((versionMajor.toInt() and 0xFFFF) shl 16) or (versionMinor.toInt() and 0xFFFF),
+                uuid = uuid,
+                articleCount = articleCount,
+                clusterCount = clusterCount,
+                urlPtrPos = urlPtrPos,
+                titlePtrPos = titlePtrPos,
+                clusterPtrPos = clusterPtrPos,
+                mimeListPos = mimeListPos,
+                mainPage = mainPage,
+                layoutPage = layoutPage
+            )
+        } catch (e: Throwable) {
+            if (e is IOException) throw e
+            throw IOException("Failed to read header: ${e.message}", e)
         }
-        return 8 // Default to revision present
     }
 
     fun readDirectoryEntry(source: ZimSource, entryOffset: Long): DirectoryEntry {
         source.seek(entryOffset)
         
-        val b1 = source.read()
-        val b2 = source.read()
-        val mimeType = (b2 shl 8) or b1
+        val b = ByteArray(2)
+        source.readFully(b)
+        val mimeType = ((b[1].toInt() and 0xFF) shl 8) or (b[0].toInt() and 0xFF)
         
         val parameterLen = source.read()
         val namespace = source.read().toChar()
         
-        val urlOffset = getUrlOffset(source, entryOffset, namespace)
-        source.seek(entryOffset + urlOffset.toLong())
-        
-        val url = readNullTerminatedString(source)
-        val title = readNullTerminatedString(source) // Title follows URL
+        // ZIM v5 and v6 ALWAYS have a 4-byte revision field
+        val revision = readLEInt(source) // offset 4..7, skipped for now
         
         var clusterNumber = -1
         var blobNumber = -1
         var redirectIndex = -1
         
         if (mimeType == 0xFFFF) {
-            redirectIndex = readLEInt(source)
+            // Redirect entry: redirectIndex follows revision
+            redirectIndex = readLEInt(source) // offset 8..11
         } else {
-            clusterNumber = readLEInt(source)
-            blobNumber = readLEInt(source)
+            // Content entry: cluster + blob
+            clusterNumber = readLEInt(source) // offset 8..11
+            blobNumber = readLEInt(source)    // offset 12..15
         }
+        
+        val url = readNullTerminatedString(source)
+        val title = readNullTerminatedString(source)
         
         return DirectoryEntry(
             mimeType = mimeType,
@@ -246,11 +227,11 @@ object ZimReader {
     }
 
     fun getClusterOffsetAndSize(source: ZimSource, header: ZimHeader, clusterNumber: Int, fileSize: Long): Pair<Long, Long> {
-        source.seek(header.clusterPtrPos + clusterNumber * 8)
+        source.seek(header.clusterPtrPos + clusterNumber * 8L)
         val clusterOffset = readLELong(source)
         
         val nextClusterOffset = if (clusterNumber < header.clusterCount - 1) {
-            source.seek(header.clusterPtrPos + (clusterNumber + 1) * 8)
+            source.seek(header.clusterPtrPos + (clusterNumber + 1) * 8L)
             readLELong(source)
         } else {
             if (header.mimeListPos > clusterOffset) header.mimeListPos else fileSize
@@ -260,70 +241,98 @@ object ZimReader {
     }
 
     fun decompressCluster(source: ZimSource, clusterOffset: Long, clusterSize: Long): ByteArray {
+        if (clusterSize <= 0) return ByteArray(0)
         source.seek(clusterOffset)
-        val compressionType = source.read()
+        val compressionTypeByte = source.read()
+        // Compression type is the lower bits of the byte
+        val compressionType = compressionTypeByte and 0x0F
         
         val compressedDataSize = clusterSize - 1
         if (compressedDataSize <= 0) return ByteArray(0)
+        if (compressedDataSize > 120 * 1024 * 1024) throw IOException("Cluster size abnormally large: $compressedDataSize")
         
         val compressedBytes = ByteArray(compressedDataSize.toInt())
         source.readFully(compressedBytes)
         
         val bais = ByteArrayInputStream(compressedBytes)
-        val decompressedStream = when (compressionType) {
-            0, 1 -> bais
-            2 -> InflaterInputStream(bais)
-            4 -> LZMA2InputStream(bais, 8192)
-            5 -> ZstdInputStream(bais)
-            else -> throw IOException("Unsupported compression type: $compressionType")
+        val decompressedStream = try {
+            when (compressionType) {
+                0 -> bais // None
+                1 -> ZstdInputStream(bais) // Zstandard: primary in ZIM v5/v6
+                2 -> LZMA2InputStream(bais, 8192) // LZMA2
+                3 -> LZMA2InputStream(bais, 8192) // Alt LZMA2
+                4 -> ZstdInputStream(bais) // Alt Zstd
+                5 -> ZstdInputStream(bais) // Alt Zstd
+                else -> {
+                    // Try Zstd if we're unsure, as it's the most common
+                    try {
+                        ZstdInputStream(ByteArrayInputStream(compressedBytes))
+                    } catch (e: Exception) {
+                        bais
+                    }
+                }
+            }
+        } catch (t: Throwable) {
+            throw IOException("Error initializing decompression stream ($compressionType): ${t.message}", t)
         }
         
         val baos = ByteArrayOutputStream()
         val buffer = ByteArray(32768)
         var read: Int
-        while (decompressedStream.read(buffer).also { read = it } != -1) {
-            baos.write(buffer, 0, read)
+        try {
+            while (decompressedStream.read(buffer).also { read = it } != -1) {
+                baos.write(buffer, 0, read)
+                if (baos.size() > 180 * 1024 * 1024) throw IOException("Decompressed cluster too large")
+            }
+        } catch (t: Throwable) {
+            throw IOException("Error reading decompressed data: ${t.message}", t)
+        } finally {
+            try { decompressedStream.close() } catch (e: Exception) {}
         }
-        decompressedStream.close()
         return baos.toByteArray()
     }
 
-    fun getHtmlForArticle(context: Context, pathOrUri: String, entry: DirectoryEntry, header: ZimHeader): String {
+    fun getHtmlForArticle(source: ZimSource, entry: DirectoryEntry, header: ZimHeader, depth: Int = 0): String {
+        if (depth > 10) return "" // Prevent infinite redirection
         if (entry.mimeType == 0xFFFF) {
-            openSource(context, pathOrUri).use { source ->
-                source.seek(header.urlPtrPos + entry.redirectIndex * 8)
-                val targetOffset = readLELong(source)
-                val targetEntry = readDirectoryEntry(source, targetOffset)
-                return getHtmlForArticle(context, pathOrUri, targetEntry, header)
-            }
+            source.seek(header.urlPtrPos + entry.redirectIndex * 8L)
+            val targetOffset = readLELong(source)
+            if (targetOffset < 0 || targetOffset > source.length()) return ""
+            val targetEntry = readDirectoryEntry(source, targetOffset)
+            return getHtmlForArticle(source, targetEntry, header, depth + 1)
         }
         
-        if (entry.clusterNumber < 0 || entry.blobNumber < 0) return ""
+        if (entry.clusterNumber < 0 || entry.blobNumber < 0 || entry.clusterNumber >= header.clusterCount) return ""
         
-        openSource(context, pathOrUri).use { source ->
-            val (clusterOffset, clusterSize) = getClusterOffsetAndSize(source, header, entry.clusterNumber, source.length())
-            val clusterBytes = decompressCluster(source, clusterOffset, clusterSize)
-            
-            if (clusterBytes.isEmpty()) return ""
-            
-            val buf = ByteBuffer.wrap(clusterBytes).order(ByteOrder.LITTLE_ENDIAN)
-            val firstPointer = buf.getInt(0)
-            val numBlobs = firstPointer / 4
-            
-            if (entry.blobNumber >= numBlobs) return ""
-            
-            val offsets = IntArray(numBlobs + 1)
-            for (i in 0..numBlobs) {
-                offsets[i] = buf.getInt(i * 4)
-            }
-            
-            val startOff = offsets[entry.blobNumber]
-            val endOff = offsets[entry.blobNumber + 1]
-            val size = endOff - startOff
-            
-            if (size <= 0 || startOff + size > clusterBytes.size) return ""
-            
-            return String(clusterBytes, startOff, size, Charsets.UTF_8)
+        val fileSize = source.length()
+        val (clusterOffset, clusterSize) = getClusterOffsetAndSize(source, header, entry.clusterNumber, fileSize)
+        
+        if (clusterOffset < 0 || clusterOffset + clusterSize > fileSize) return ""
+        
+        val clusterBytes = decompressCluster(source, clusterOffset, clusterSize)
+        
+        if (clusterBytes.size < 4) return ""
+        
+        val buf = ByteBuffer.wrap(clusterBytes).order(ByteOrder.LITTLE_ENDIAN)
+        val firstOffset = try { buf.getInt(0) } catch (e: Exception) { 0 }
+        
+        if (firstOffset < 4 || firstOffset % 4 != 0 || firstOffset > clusterBytes.size) return ""
+        
+        val numOffsets = firstOffset / 4
+        val numBlobs = numOffsets - 1
+        
+        if (entry.blobNumber >= numBlobs || entry.blobNumber < 0) return ""
+        
+        val startOff = buf.getInt(entry.blobNumber * 4)
+        val endOff = buf.getInt((entry.blobNumber + 1) * 4)
+        val size = endOff - startOff
+        
+        if (size <= 0 || startOff < 0 || startOff + size > clusterBytes.size) return ""
+        
+        return try {
+            String(clusterBytes, startOff, size, Charsets.UTF_8)
+        } catch (e: Exception) {
+            ""
         }
     }
 
@@ -342,23 +351,18 @@ object ZimReader {
                 // Add common variants
                 searchKeys.add("A/$cleanUrl")
                 searchKeys.add("a/$cleanUrl")
-                     for (key in searchKeys) {
+                
+                for (key in searchKeys) {
                     var low = 0
                     var high = header.articleCount - 1
                     
                     while (low <= high) {
                         val mid = (low + high) ushr 1
-                        source.seek(header.urlPtrPos + mid * 8)
+                        source.seek(header.urlPtrPos + mid * 8L)
                         val entryOffset = readLELong(source)
-                        
-                        // Read namespace at offset 3 of directory entry
-                        source.seek(entryOffset + 3)
-                        val nsChar = source.read().toChar()
-                        
-                        // Dynamically locate and seek to the correct URL offset based on whether revision field is present
-                        val urlOffset = getUrlOffset(source, entryOffset, nsChar)
-                        source.seek(entryOffset + urlOffset)
-                        val rawUrl = readNullTerminatedString(source)
+                        val entry = readDirectoryEntry(source, entryOffset)
+                        val rawUrl = entry.url
+                        val nsChar = entry.namespace
                         
                         // Construct comparison key matching namespace + "/" + rawUrl structure
                         val entryUrlNormalized = if (rawUrl.startsWith("$nsChar/", ignoreCase = true)) {
@@ -375,63 +379,49 @@ object ZimReader {
                         } else if (comp > 0) {
                             high = mid - 1
                         } else {
-                            val entry = readDirectoryEntry(source, entryOffset)
-                            val html = getHtmlForArticle(context, pathOrUri, entry, header)
+                            val html = getHtmlForArticle(source, entry, header)
                             if (html.isNotEmpty()) return html
                         }
                     }
                 }
                 
-                // Direct fallback: if binary search fails because of some weird encoding/sorting mismatch,
-                // try to query directly by comparing rawUrl and cleanUrl
+                // Direct fallback binary search by rawUrl
                 var low = 0
                 var high = header.articleCount - 1
                 while (low <= high) {
                     val mid = (low + high) ushr 1
-                    source.seek(header.urlPtrPos + mid * 8)
+                    source.seek(header.urlPtrPos + mid * 8L)
                     val entryOffset = readLELong(source)
+                    val entry = readDirectoryEntry(source, entryOffset)
                     
-                    source.seek(entryOffset + 3)
-                    val nsChar = source.read().toChar()
-                    val urlOffset = getUrlOffset(source, entryOffset, nsChar)
-                    source.seek(entryOffset + urlOffset)
-                    val rawUrl = readNullTerminatedString(source)
-                    
-                    val comp = rawUrl.compareTo(cleanUrl, ignoreCase = true)
+                    val comp = entry.url.compareTo(cleanUrl, ignoreCase = true)
                     if (comp < 0) {
                         low = mid + 1
                     } else if (comp > 0) {
                         high = mid - 1
                     } else {
-                        val entry = readDirectoryEntry(source, entryOffset)
-                        val html = getHtmlForArticle(context, pathOrUri, entry, header)
+                        val html = getHtmlForArticle(source, entry, header)
                         if (html.isNotEmpty()) return html
                     }
                 }
                 
-                // Ultimate linear scan backup for a small number of items if binary search inexplicably fails
-                // (Only do this for small archives or up to 2000 items to avoid freezing)
+                // Ultimate linear scan backup for small archives
                 if (header.articleCount < 5000) {
-                    for (mid in 0 until header.articleCount) {
-                        source.seek(header.urlPtrPos + mid * 8L)
-                        val entryOffset = readLELong(source)
-                        
-                        source.seek(entryOffset + 3)
-                        val nsChar = source.read().toChar()
-                        val urlOffset = getUrlOffset(source, entryOffset, nsChar)
-                        source.seek(entryOffset + urlOffset)
-                        val rawUrl = readNullTerminatedString(source)
+                    for (i in 0 until header.articleCount) {
+                        source.seek(header.urlPtrPos + i * 8L)
+                        val entryOffset = try { readLELong(source) } catch (e: Throwable) { continue }
+                        val entry = try { readDirectoryEntry(source, entryOffset) } catch (e: Throwable) { continue }
+                        val rawUrl = entry.url
                         
                         val cleanRawUrl = if (rawUrl.contains("/")) rawUrl.substring(rawUrl.indexOf('/') + 1) else rawUrl
                         if (cleanRawUrl.equals(cleanUrl, ignoreCase = true)) {
-                            val entry = readDirectoryEntry(source, entryOffset)
-                            val html = getHtmlForArticle(context, pathOrUri, entry, header)
+                            val html = getHtmlForArticle(source, entry, header)
                             if (html.isNotEmpty()) return html
                         }
                     }
                 }
             }
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             e.printStackTrace()
         }
         return ""
@@ -451,14 +441,10 @@ object ZimReader {
                 
                 while (low <= high) {
                     val mid = (low + high) ushr 1
-                    source.seek(header.urlPtrPos + mid * 8)
+                    source.seek(header.urlPtrPos + mid * 8L)
                     val entryOffset = readLELong(source)
-                    
-                    source.seek(entryOffset + 3)
-                    val nsChar = source.read().toChar()
-                    val urlOffset = getUrlOffset(source, entryOffset, nsChar)
-                    source.seek(entryOffset + urlOffset)
-                    val url = readNullTerminatedString(source).lowercase()
+                    val entry = readDirectoryEntry(source, entryOffset)
+                    val url = entry.url.lowercase()
                     
                     val cleanUrl = if (url.startsWith("a/")) url.substring(2) else url
                     val comp = cleanUrl.compareTo(cleanQuery)
@@ -476,7 +462,7 @@ object ZimReader {
                 var scanned = 0
                 while (i < header.articleCount && results.size < limit && scanned < maxScan) {
                     scanned++
-                    source.seek(header.urlPtrPos + i * 8)
+                    source.seek(header.urlPtrPos + i * 8L)
                     val entryOffset = readLELong(source)
                     val entry = readDirectoryEntry(source, entryOffset)
                     i++
@@ -514,7 +500,7 @@ object ZimReader {
                     var scannedBack = 0
                     while (j >= 0 && results.size < limit && scannedBack < 1000) {
                         scannedBack++
-                        source.seek(header.urlPtrPos + j * 8)
+                        source.seek(header.urlPtrPos + j * 8L)
                         val entryOffset = readLELong(source)
                         val entry = readDirectoryEntry(source, entryOffset)
                         j--
@@ -550,7 +536,7 @@ object ZimReader {
                     }
                 }
             }
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             e.printStackTrace()
         }
         
@@ -574,7 +560,7 @@ object ZimReader {
                 var checked = 0
                 while (result.size < limit && checked < limit * 100 && index < totalCount) {
                     checked++
-                    source.seek(header.urlPtrPos + index * 8)
+                    source.seek(header.urlPtrPos + index * 8L)
                     val entryOffset = readLELong(source)
                     val entry = readDirectoryEntry(source, entryOffset)
                     index++
@@ -617,7 +603,7 @@ object ZimReader {
                     }
                 }
             }
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             e.printStackTrace()
         }
         return result
@@ -681,7 +667,7 @@ object ZimReader {
                     // Читаем короткий excerpt (~150 символов) если база небольшая, иначе берем быстрый шаблон
                     val excerpt = if (shouldExtractExcerpts) {
                         try {
-                            extractExcerpt(context, pathOrUri, entry, header, maxChars = 150)
+                            extractExcerpt(source, entry, header, maxChars = 150)
                         } catch (e: Exception) {
                             ""
                         }
@@ -725,7 +711,7 @@ object ZimReader {
 
                 onProgress(total, total)
             }
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             e.printStackTrace()
         }
     }
@@ -734,15 +720,18 @@ object ZimReader {
      * Читает только начало HTML-контента статьи и вырезает первые maxChars символов текста.
      */
     private fun extractExcerpt(
-        context: Context,
-        pathOrUri: String,
+        source: ZimSource,
         entry: DirectoryEntry,
         header: ZimHeader,
         maxChars: Int
     ): String {
         if (entry.clusterNumber < 0 || entry.blobNumber < 0) return ""
 
-        val html = getHtmlForArticle(context, pathOrUri, entry, header)
+        val html = try {
+            getHtmlForArticle(source, entry, header)
+        } catch (t: Throwable) {
+            ""
+        }
         if (html.isEmpty()) return ""
 
         return try {
@@ -751,7 +740,7 @@ object ZimReader {
                 .replace(Regex("\\s+"), " ")
                 .trim()
             if (text.length > maxChars) text.take(maxChars) + "…" else text
-        } catch (e: Exception) {
+        } catch (t: Throwable) {
             ""
         }
     }

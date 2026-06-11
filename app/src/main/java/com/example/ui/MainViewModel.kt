@@ -153,7 +153,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     } else {
                         article.copy(htmlContent = "<h3>Ошибка: Сбой поиска архива</h3>")
                     }
-                } catch (e: Exception) {
+                } catch (e: Throwable) {
                     e.printStackTrace()
                     article.copy(htmlContent = "<h3>Ошибка при чтении статьи: ${e.localizedMessage ?: e.message}</h3>")
                 }
@@ -355,7 +355,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 if (file.exists() && file.length() > 1024 * 1024) {
                     FileZimSource(file).use { pSource ->
                         val header = ZimReader.readHeader(pSource)
-                        header.magic == 1113824004 || header.magic == 72173914
+                        (header.magic and 0xFFFFFF) == 0x4D495A
                     }
                 } else false
             } catch (e: Exception) {
@@ -407,7 +407,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val isRealZim = try {
                     UriZimSource(context, uri).use { pSource ->
                         val header = ZimReader.readHeader(pSource)
-                        header.magic == 1113824004 || header.magic == 72173914
+                        (header.magic and 0xFFFFFF) == 0x4D495A
                     }
                 } catch (e: Exception) {
                     false
