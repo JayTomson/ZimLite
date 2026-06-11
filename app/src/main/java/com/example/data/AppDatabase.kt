@@ -33,12 +33,12 @@ interface ArticleDao {
     @Query("SELECT * FROM articles WHERE archiveId = :archiveId")
     fun getArticlesByArchive(archiveId: String): Flow<List<ArticleEntity>>
 
-    @Query("SELECT * FROM articles WHERE title LIKE :query LIMIT 50")
-    fun searchArticlesByTitle(query: String): Flow<List<ArticleEntity>>
+    @Query("SELECT * FROM articles WHERE title LIKE :query ORDER BY length(title) ASC LIMIT 50")
+    suspend fun searchArticlesByTitle(query: String): List<ArticleEntity>
 
     // Search query that searches titles and contents
-    @Query("SELECT * FROM articles WHERE title LIKE :query OR excerpt LIKE :query OR category LIKE :query")
-    fun searchArticles(query: String): Flow<List<ArticleEntity>>
+    @Query("SELECT * FROM articles WHERE title LIKE :query OR excerpt LIKE :query OR category LIKE :query ORDER BY length(title) ASC LIMIT 50")
+    suspend fun searchArticles(query: String): List<ArticleEntity>
 
     @Query("SELECT * FROM articles WHERE isFeedCandidate = 1 ORDER BY RANDOM() LIMIT :limit")
     fun getRandomFeedArticles(limit: Int): Flow<List<ArticleEntity>>
@@ -58,9 +58,21 @@ interface ArticleDao {
             SELECT articleId FROM articles_fts
             WHERE articles_fts MATCH :query
         )
+        ORDER BY (CASE WHEN title LIKE :exactTitleQuery THEN 0 ELSE 1 END), length(title) ASC
         LIMIT :limit
     """)
-    suspend fun searchArticlesFts(query: String, limit: Int = 50): List<ArticleEntity>
+    suspend fun searchArticlesFts(query: String, exactTitleQuery: String, limit: Int = 100): List<ArticleEntity>
+
+    // Advanced title search that doesn't depend on FTS (for 100% reliability with short prefixes)
+    @Query("""
+        SELECT * FROM articles 
+        WHERE (:w1 IS NULL OR title LIKE :w1)
+          AND (:w2 IS NULL OR title LIKE :w2)
+          AND (:w3 IS NULL OR title LIKE :w3)
+        ORDER BY length(title) ASC
+        LIMIT :limit
+    """)
+    suspend fun searchArticlesByTitleMulti(w1: String?, w2: String?, w3: String?, limit: Int = 50): List<ArticleEntity>
 
     @Query("SELECT * FROM articles WHERE id = :id LIMIT 1")
     suspend fun getArticleById(id: String): ArticleEntity?

@@ -34,6 +34,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.draw.scale
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.material.icons.automirrored.filled.Feed
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -734,7 +735,7 @@ fun SearchScreen(viewModel: MainViewModel) {
             onValueChange = { viewModel.searchQuery.value = it },
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 12.dp)
+                .padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 4.dp)
                 .border(
                     width = 1.dp,
                     color = MaterialTheme.colorScheme.outline.copy(alpha = 0.35f),
@@ -760,6 +761,8 @@ fun SearchScreen(viewModel: MainViewModel) {
                 unfocusedIndicatorColor = Color.Transparent
             )
         )
+
+        Spacer(modifier = Modifier.height(8.dp))
 
         if (searchedArticles.isEmpty()) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {

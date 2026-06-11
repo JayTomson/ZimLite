@@ -253,7 +253,11 @@ object ZimReader {
         if (data.size >= 4) {
             // Zstd magic: 0xFD2FB528 (Little Endian in bytes: 28 B5 2F FD)
             if (data[0] == 0x28.toByte() && data[1] == 0xB5.toByte() && data[2] == 0x2F.toByte() && data[3] == 0xFD.toByte()) {
-                com.github.luben.zstd.util.Native.load()
+                try {
+                    com.github.luben.zstd.util.Native.load()
+                } catch (e: Throwable) {
+                    Log.e("ZimReader", "Failed to load Zstd native library", e)
+                }
                 return ZstdInputStream(bais)
             }
             
@@ -273,7 +277,11 @@ object ZimReader {
             2 -> InflaterInputStream(bais)
             4 -> org.tukaani.xz.XZInputStream(bais)
             5 -> {
-                com.github.luben.zstd.util.Native.load()
+                try {
+                    com.github.luben.zstd.util.Native.load()
+                } catch (e: Throwable) {
+                    Log.e("ZimReader", "Failed to load Zstd native library", e)
+                }
                 ZstdInputStream(bais)
             }
             else -> throw IOException("Unsupported compression type: $compressionType")
@@ -714,7 +722,7 @@ object ZimReader {
                             val correctUrl = "${entry.namespace}/${entry.url}"
                             results.add(
                                 ArticleEntity(
-                                    id = "${archiveId}_${entry.url}",
+                                    id = "${archiveId}_${entry.namespace}_${entry.url}",
                                     archiveId = archiveId,
                                     archiveTitle = archiveTitle,
                                     url = correctUrl,
@@ -751,7 +759,7 @@ object ZimReader {
                                 val correctUrl = "${entry.namespace}/${entry.url}"
                                 results.add(
                                     ArticleEntity(
-                                        id = "${archiveId}_${entry.url}",
+                                        id = "${archiveId}_${entry.namespace}_${entry.url}",
                                         archiveId = archiveId,
                                         archiveTitle = archiveTitle,
                                         url = correctUrl,
@@ -815,7 +823,7 @@ object ZimReader {
                         val correctUrl = "${entry.namespace}/${entry.url}"
                         result.add(
                             ArticleEntity(
-                                id = "${archiveId}_${entry.url}",
+                                id = "${archiveId}_${entry.namespace}_${entry.url}",
                                 archiveId = archiveId,
                                 archiveTitle = archiveTitle,
                                 url = correctUrl,
@@ -906,7 +914,7 @@ object ZimReader {
 
                     batch.add(
                         ArticleEntity(
-                            id = "${archiveId}_${entry.url}",
+                            id = "${archiveId}_${entry.namespace}_${entry.url}",
                             archiveId = archiveId,
                             archiveTitle = archiveTitle,
                             url = correctUrl,

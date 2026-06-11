@@ -16,9 +16,21 @@
 # debugging stack traces.
 #-keepattributes SourceFile,LineNumberTable
 
-# If you keep the line number information, uncomment this to
-# hide the original source file name.
-#-renamesourcefileattribute SourceFile
+# Zstd JNI
+-keep class com.github.luben.zstd.** { *; }
+-dontwarn com.github.luben.zstd.**
+
+# XZ (LZMA)
+-keep class org.tukaani.xz.** { *; }
+-dontwarn org.tukaani.xz.**
+
+# Room
+-keep class * extends androidx.room.RoomDatabase
+-keep class com.example.data.** { *; }
+
+# Kotlin Serialization (if used in future)
+-keepattributes *Annotation*, EnclosingMethod, InnerClasses, Signature
+-keep class kotlinx.serialization.** { *; }
 
 # OkHttp ProGuard Rules
 -dontwarn okhttp3.internal.platform.**

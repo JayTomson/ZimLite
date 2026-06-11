@@ -55,45 +55,52 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     
     // Dynamically filtered articles based on search query (returns empty list instantly if query is empty)
     val searchedArticles: StateFlow<List<ArticleEntity>> = combine(searchQuery, searchInContent) { query, inContent ->
-        Pair(query, inContent)
+        Pair(query.trim(), inContent)
     }
-        .debounce(250)
-        .flatMapLatest { (query, inContent) ->
-            val cleanQuery = query.trim()
-            if (cleanQuery.length < 2) {
+        .debounce(200)
+        .distinctUntilChanged()
+        .flatMapLatest { (cleanQuery, inContent) ->
+            if (cleanQuery.isEmpty()) {
                 flowOf(emptyList())
             } else {
                 flow {
-                    val ftsQuery = cleanQuery
-                        .split("\\s+".toRegex())
-                        .filter { it.isNotEmpty() }
-                        .joinToString(" ") { token ->
-                            val safe = token.replace("\"", "").replace("*", "").replace("(", "").replace(")", "")
-                            if (safe.isEmpty()) "" else safe
-                        }
-                        .trim()
+                    // Tokenize query for multi-word matching
+                    val tokens = cleanQuery.split("\\s+".toRegex()).filter { it.isNotEmpty() }
+                    
+                    // Simple FTS query construction: word1* word2*
+                    val ftsQueryString = tokens.joinToString(" ") { "$it*" }
 
-                    if (ftsQuery.isEmpty()) {
-                        emit(emptyList())
-                    } else {
-                        val results = withContext(Dispatchers.IO) {
-                            try {
-                                if (inContent) {
-                                    articleDao.searchArticlesFts(ftsQuery, limit = 50)
+                    // If user only wants Titles, we can use a more reliable LIKE-based multi-word search
+                    // especially for short Russian prefixes that FTS might treat weirdly as stopwords.
+                    val results = withContext(Dispatchers.IO) {
+                        try {
+                            if (inContent) {
+                                // For content search, FTS is mandatory for performance
+                                if (ftsQueryString.isEmpty()) emptyList()
+                                else articleDao.searchArticlesFts(ftsQueryString, exactTitleQuery = "%$cleanQuery%", limit = 100)
+                            } else {
+                                // For titles only, we prioritize 100% reliability as requested
+                                if (tokens.isEmpty()) {
+                                    emptyList()
+                                } else if (tokens.size <= 3) {
+                                    // Use our 100% reliable LIKE multi-search for up to 3 words
+                                    val w1 = "%${tokens[0]}%"
+                                    val w2 = if (tokens.size > 1) "%${tokens[1]}%" else null
+                                    val w3 = if (tokens.size > 2) "%${tokens[2]}%" else null
+                                    articleDao.searchArticlesByTitleMulti(w1, w2, w3)
                                 } else {
-                                    articleDao.searchArticlesByTitle("%$cleanQuery%").first()
-                                }
-                            } catch (e: Exception) {
-                                e.printStackTrace()
-                                if (inContent) {
-                                    articleDao.searchArticles("%$cleanQuery%").first().take(50)
-                                } else {
-                                    articleDao.searchArticlesByTitle("%$cleanQuery%").first()
+                                    // Fallback to FTS if many words, but scoped to title
+                                    val scopedFts = "title:($ftsQueryString)"
+                                    articleDao.searchArticlesFts(scopedFts, exactTitleQuery = "%$cleanQuery%", limit = 100)
                                 }
                             }
+                        } catch (e: Exception) {
+                            e.printStackTrace()
+                            // Absolute fallback to LIKE if anything fails
+                            articleDao.searchArticlesByTitle("%$cleanQuery%")
                         }
-                        emit(results)
                     }
+                    emit(results)
                 }
             }
         }
@@ -300,16 +307,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     articleDao.getRandomFeed(limit = 10)
                 }
                 if (randomArticles.isEmpty()) {
-                    // Fallback to preloaded standard list
+                    // Fallback to a limited set instead of ALL articles to avoid OOM
                     randomArticles = withContext(Dispatchers.IO) {
                         try {
-                            articleDao.getAllArticles().first().shuffled().take(10)
+                            articleDao.getFeedPage(limit = 10, offset = 0)
                         } catch (e: Exception) {
                             emptyList()
                         }
                     }
                 }
-                _feedArticles.value = randomArticles
+                _feedArticles.value = randomArticles.shuffled()
             } catch (e: Exception) {
                 e.printStackTrace()
             }
