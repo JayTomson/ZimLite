@@ -1,21 +1,13 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://ai.google.dev/static/site-assets/images/share-ais-513315318.png" />
-</div>
+# ZimLite
 
-# Run and deploy your AI Studio app
+Lightweight ZIM file reader for Android. Built with Jetpack Compose.
 
-This contains everything you need to run your app locally.
+## Features
+- **Fast ZIM Reading**: Read offline archives (Wikipedia, Wiktionary, Wikiquote, etc.) directly on your device.
+- **Deep Indexing**: Optional full-text search capability.
+- **Local Files**: Support for local HTML and ZIM files.
+- **Modern UI**: Clean Material 3 interface with dark mode support.
+- **Efficient**: Low memory footprint and optimized for large archives.
 
-View your app in AI Studio: https://ai.studio/apps/edaf9cd9-4cec-478a-ba3d-2eee4b078352
-
-## Run Locally
-
-**Prerequisites:**  [Android Studio](https://developer.android.com/studio)
-
-
-1. Open Android Studio
-2. Select **Open** and choose the directory containing this project
-3. Allow Android Studio to fix any incompatibilities as it imports the project.
-4. Create a file named `.env` in the project directory and set `GEMINI_API_KEY` in that file to your Gemini API key (see `.env.example` for an example)
-5. Remove this line from the app's `build.gradle.kts` file: `signingConfig = signingConfigs.getByName("debugConfig")`
-6. Run the app on an emulator or physical device
+## License
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
