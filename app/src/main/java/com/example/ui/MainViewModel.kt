@@ -472,57 +472,61 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         indexingTotal.value = 0
         
         indexingJob = viewModelScope.launch {
-            withContext(Dispatchers.IO) {
-                var fileLength = file.length()
-                if (fileLength < 1024 * 1024) {
-                    // If the downloaded file is a placeholder/simulated text file, use standardized mock sizes
-                    fileLength = when {
-                        archiveId.contains("wikipedia", ignoreCase = true) -> 2147483648L // 2.0 GB representation
-                        archiveId.contains("wikiquote", ignoreCase = true) -> 152043520L // 145 MB representation
-                        else -> 131072000L // 125 MB fallback representation
-                    }
-                }
-                
-                val isRealZim = try {
-                    if (file.exists() && file.length() > 1024 * 1024) {
-                        FileZimSource(file).use { pSource ->
-                            val header = ZimReader.readHeader(pSource)
-                            (header.magic and 0xFFFFFF) == 0x4D495A
+            try {
+                withContext(Dispatchers.IO) {
+                    var fileLength = file.length()
+                    if (fileLength < 1024 * 1024) {
+                        // If the downloaded file is a placeholder/simulated text file, use standardized mock sizes
+                        fileLength = when {
+                            archiveId.contains("wikipedia", ignoreCase = true) -> 2147483648L // 2.0 GB representation
+                            archiveId.contains("wikiquote", ignoreCase = true) -> 152043520L // 145 MB representation
+                            else -> 131072000L // 125 MB fallback representation
                         }
-                    } else false
-                } catch (e: Exception) {
-                    false
+                    }
+                    
+                    val isRealZim = try {
+                        if (file.exists() && file.length() > 1024 * 1024) {
+                            FileZimSource(file).use { pSource ->
+                                val header = ZimReader.readHeader(pSource)
+                                (header.magic and 0xFFFFFF) == 0x4D495A
+                            }
+                        } else false
+                    } catch (e: Exception) {
+                        false
+                    }
+
+                    val totalCount = doFullIndexing(
+                        context = getApplication(),
+                        pathOrUri = file.absolutePath,
+                        isRealZim = isRealZim,
+                        archiveId = archiveId,
+                        archiveTitle = archiveTitle,
+                        cleanNameForFallback = archiveId
+                    )
+
+                    // Register archive in DB
+                    val newArchive = ArchiveEntity(
+                        id = archiveId,
+                        title = archiveTitle,
+                        sourceUrl = url,
+                        filePath = file.absolutePath,
+                        fileSize = fileLength,
+                        articleCount = totalCount,
+                        dateAdded = System.currentTimeMillis()
+                    )
+                    archiveDao.insertArchive(newArchive)
                 }
-
-                val totalCount = doFullIndexing(
-                    context = getApplication(),
-                    pathOrUri = file.absolutePath,
-                    isRealZim = isRealZim,
-                    archiveId = archiveId,
-                    archiveTitle = archiveTitle,
-                    cleanNameForFallback = archiveId
-                )
-
-                // Register archive in DB
-                val newArchive = ArchiveEntity(
-                    id = archiveId,
-                    title = archiveTitle,
-                    sourceUrl = url,
-                    filePath = file.absolutePath,
-                    fileSize = fileLength,
-                    articleCount = totalCount,
-                    dateAdded = System.currentTimeMillis()
-                )
-                archiveDao.insertArchive(newArchive)
+            } catch (e: Exception) {
+                e.printStackTrace()
+            } finally {
+                // Complete download block
+                isIndexing.value = false
+                indexingProgress.value = 0
+                indexingTotal.value = 0
+                downloadProgress.value = null
+                indexingJob = null
+                refreshFeed() // Reload feed with newly indexed content
             }
-            
-            // Complete download block
-            isIndexing.value = false
-            indexingProgress.value = 0
-            indexingTotal.value = 0
-            downloadProgress.value = null
-            indexingJob = null
-            refreshFeed() // Reload feed with newly indexed content
         }
     }
 
@@ -537,56 +541,60 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             indexingProgress.value = 0
             indexingTotal.value = 0
             
-            withContext(Dispatchers.IO) {
-                val isRealZim = try {
-                    UriZimSource(context, uri).use { pSource ->
-                        val header = ZimReader.readHeader(pSource)
-                        (header.magic and 0xFFFFFF) == 0x4D495A
+            try {
+                withContext(Dispatchers.IO) {
+                    val isRealZim = try {
+                        UriZimSource(context, uri).use { pSource ->
+                            val header = ZimReader.readHeader(pSource)
+                            (header.magic and 0xFFFFFF) == 0x4D495A
+                        }
+                    } catch (e: Exception) {
+                        false
                     }
-                } catch (e: Exception) {
-                    false
-                }
 
-                val totalCount = doFullIndexing(
-                    context = context,
-                    pathOrUri = uri.toString(),
-                    isRealZim = isRealZim,
-                    archiveId = id,
-                    archiveTitle = "Файл: $cleanName",
-                    cleanNameForFallback = cleanName
-                )
-                
-                // Query real file size from ContentResolver
-                val resolvedSize = try {
-                    context.contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.SIZE), null, null, null)?.use { cursor ->
-                        if (cursor.moveToFirst()) {
-                            val sizeIndex = cursor.getColumnIndex(android.provider.OpenableColumns.SIZE)
-                            if (sizeIndex != -1) cursor.getLong(sizeIndex) else 0L
-                        } else 0L
-                    } ?: 0L
-                } catch (e: Exception) {
-                    0L
+                    val totalCount = doFullIndexing(
+                        context = context,
+                        pathOrUri = uri.toString(),
+                        isRealZim = isRealZim,
+                        archiveId = id,
+                        archiveTitle = "Файл: $cleanName",
+                        cleanNameForFallback = cleanName
+                    )
+                    
+                    // Query real file size from ContentResolver
+                    val resolvedSize = try {
+                        context.contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.SIZE), null, null, null)?.use { cursor ->
+                            if (cursor.moveToFirst()) {
+                                val sizeIndex = cursor.getColumnIndex(android.provider.OpenableColumns.SIZE)
+                                if (sizeIndex != -1) cursor.getLong(sizeIndex) else 0L
+                            } else 0L
+                        } ?: 0L
+                    } catch (e: Exception) {
+                        0L
+                    }
+                    
+                    val fileSizeInBytes = if (resolvedSize > 0) resolvedSize else 1024 * 1024 * 145L // Fallback to 145 MB if resolution fails
+                    
+                    val newArchive = ArchiveEntity(
+                        id = id,
+                        title = "Файл: $cleanName",
+                        sourceUrl = "Локальный файл",
+                        filePath = uri.toString(),
+                        fileSize = fileSizeInBytes,
+                        articleCount = totalCount,
+                        dateAdded = System.currentTimeMillis()
+                    )
+                    archiveDao.insertArchive(newArchive)
                 }
-                
-                val fileSizeInBytes = if (resolvedSize > 0) resolvedSize else 1024 * 1024 * 145L // Fallback to 145 MB if resolution fails
-                
-                val newArchive = ArchiveEntity(
-                    id = id,
-                    title = "Файл: $cleanName",
-                    sourceUrl = "Локальный файл",
-                    filePath = uri.toString(),
-                    fileSize = fileSizeInBytes,
-                    articleCount = totalCount,
-                    dateAdded = System.currentTimeMillis()
-                )
-                archiveDao.insertArchive(newArchive)
+            } catch (e: Exception) {
+                e.printStackTrace()
+            } finally {
+                isIndexing.value = false
+                indexingProgress.value = 0
+                indexingTotal.value = 0
+                indexingJob = null
+                refreshFeed()
             }
-            
-            isIndexing.value = false
-            indexingProgress.value = 0
-            indexingTotal.value = 0
-            indexingJob = null
-            refreshFeed()
         }
     }
 
@@ -780,68 +788,72 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         indexingJob = viewModelScope.launch {
             isIndexing.value = true
             
-            withContext(Dispatchers.IO) {
-                val htmlContent = try {
-                    context.contentResolver.openInputStream(uri)?.use { stream ->
-                        stream.bufferedReader().use { it.readText() }
-                    } ?: ""
-                } catch (e: Exception) {
-                    ""
-                }
-                
-                if (htmlContent.isNotEmpty()) {
-                    // Extract a clean snippet of text as the excerpt
-                    val textOnly = try {
-                        val parsed = android.text.Html.fromHtml(htmlContent, android.text.Html.FROM_HTML_MODE_LEGACY).toString()
-                        if (parsed.length > 250) parsed.take(200) + "..." else parsed
+            try {
+                withContext(Dispatchers.IO) {
+                    val htmlContent = try {
+                        context.contentResolver.openInputStream(uri)?.use { stream ->
+                            stream.bufferedReader().use { it.readText() }
+                        } ?: ""
                     } catch (e: Exception) {
-                        "Локальный HTML-документ"
+                        ""
                     }
                     
-                    val article = ArticleEntity(
-                        id = "${id}_main",
-                        archiveId = id,
-                        archiveTitle = "Файл: $name",
-                        url = "index.html",
-                        title = cleanName,
-                        category = "HTML-документ",
-                        excerpt = textOnly.trim(),
-                        htmlContent = htmlContent,
-                        isFeedCandidate = true
-                    )
-                    
-                    articleDao.insertArticles(listOf(article))
-                    
-                    // Query real file size from ContentResolver
-                    val resolvedSize = try {
-                        context.contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.SIZE), null, null, null)?.use { cursor ->
-                            if (cursor.moveToFirst()) {
-                                val sizeIndex = cursor.getColumnIndex(android.provider.OpenableColumns.SIZE)
-                                if (sizeIndex != -1) cursor.getLong(sizeIndex) else 0L
-                            } else 0L
-                        } ?: 0L
-                    } catch (e: Exception) {
-                        0L
+                    if (htmlContent.isNotEmpty()) {
+                        // Extract a clean snippet of text as the excerpt
+                        val textOnly = try {
+                            val parsed = android.text.Html.fromHtml(htmlContent, android.text.Html.FROM_HTML_MODE_LEGACY).toString()
+                            if (parsed.length > 250) parsed.take(200) + "..." else parsed
+                        } catch (e: Exception) {
+                            "Локальный HTML-документ"
+                        }
+                        
+                        val article = ArticleEntity(
+                            id = "${id}_main",
+                            archiveId = id,
+                            archiveTitle = "Файл: $name",
+                            url = "index.html",
+                            title = cleanName,
+                            category = "HTML-документ",
+                            excerpt = textOnly.trim(),
+                            htmlContent = htmlContent,
+                            isFeedCandidate = true
+                        )
+                        
+                        articleDao.insertArticles(listOf(article))
+                        
+                        // Query real file size from ContentResolver
+                        val resolvedSize = try {
+                            context.contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.SIZE), null, null, null)?.use { cursor ->
+                                if (cursor.moveToFirst()) {
+                                    val sizeIndex = cursor.getColumnIndex(android.provider.OpenableColumns.SIZE)
+                                    if (sizeIndex != -1) cursor.getLong(sizeIndex) else 0L
+                                } else 0L
+                            } ?: 0L
+                        } catch (e: Exception) {
+                            0L
+                        }
+                        
+                        val fileSizeInBytes = if (resolvedSize > 0) resolvedSize else htmlContent.toByteArray().size.toLong()
+                        
+                        val newArchive = ArchiveEntity(
+                            id = id,
+                            title = "Файл: $name",
+                            sourceUrl = "Локальный HTML",
+                            filePath = uri.toString(),
+                            fileSize = fileSizeInBytes,
+                            articleCount = 1,
+                            dateAdded = System.currentTimeMillis()
+                        )
+                        archiveDao.insertArchive(newArchive)
                     }
-                    
-                    val fileSizeInBytes = if (resolvedSize > 0) resolvedSize else htmlContent.toByteArray().size.toLong()
-                    
-                    val newArchive = ArchiveEntity(
-                        id = id,
-                        title = "Файл: $name",
-                        sourceUrl = "Локальный HTML",
-                        filePath = uri.toString(),
-                        fileSize = fileSizeInBytes,
-                        articleCount = 1,
-                        dateAdded = System.currentTimeMillis()
-                    )
-                    archiveDao.insertArchive(newArchive)
                 }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            } finally {
+                isIndexing.value = false
+                indexingJob = null
+                refreshFeed()
             }
-            
-            isIndexing.value = false
-            indexingJob = null
-            refreshFeed()
         }
     }
 

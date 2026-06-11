@@ -19,3 +19,16 @@
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
+
+# OkHttp ProGuard Rules
+-dontwarn okhttp3.internal.platform.**
+-dontwarn org.conscrypt.**
+-dontwarn org.bouncycastle.**
+-dontwarn org.openjsse.**
+
+-keepclassmembers class * extends javax.net.ssl.SSLSocketFactory {
+    public <init>(...);
+}
+-keepclassmembers class * extends javax.net.ssl.X509TrustManager {
+    public <init>(...);
+}

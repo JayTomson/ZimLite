@@ -38,6 +38,7 @@ import androidx.compose.animation.animateColorAsState
 import androidx.compose.material.icons.automirrored.filled.Feed
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.LibraryBooks
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
@@ -79,9 +80,9 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun ZimLiteApp(viewModel: MainViewModel) {
     val context = LocalContext.current
-    val currentTab by remember { derivedStateOf { viewModel.currentTab.value } }
-    val insideSettings by remember { derivedStateOf { viewModel.insideSettings.value } }
-    val activeArticle by remember { derivedStateOf { viewModel.activeArticle.value } }
+    val currentTab = viewModel.currentTab.value
+    val insideSettings = viewModel.insideSettings.value
+    val activeArticle = viewModel.activeArticle.value
     
     val archives by viewModel.archives.collectAsStateWithLifecycle()
 
@@ -362,7 +363,11 @@ fun ZimLiteApp(viewModel: MainViewModel) {
                 modifier = Modifier
                     .fillMaxSize()
                     .background(Color.Black.copy(alpha = 0.6f))
-                    .clickable(enabled = false) {},
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClick = { /* Consume clicks to block background */ }
+                    ),
                 contentAlignment = Alignment.Center
             ) {
                 Card(
