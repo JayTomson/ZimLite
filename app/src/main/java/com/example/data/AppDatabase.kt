@@ -66,9 +66,9 @@ interface ArticleDao {
     // Advanced title search that doesn't depend on FTS (for 100% reliability with short prefixes)
     @Query("""
         SELECT * FROM articles 
-        WHERE (:w1 IS NULL OR title LIKE :w1)
-          AND (:w2 IS NULL OR title LIKE :w2)
-          AND (:w3 IS NULL OR title LIKE :w3)
+        WHERE (:w1 IS NULL OR LOWER(title) LIKE LOWER(:w1))
+          AND (:w2 IS NULL OR LOWER(title) LIKE LOWER(:w2))
+          AND (:w3 IS NULL OR LOWER(title) LIKE LOWER(:w3))
         ORDER BY length(title) ASC
         LIMIT :limit
     """)
