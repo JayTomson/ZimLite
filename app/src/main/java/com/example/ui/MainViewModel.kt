@@ -489,7 +489,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     if (fileLength < 1024 * 1024) {
                         // If the downloaded file is a placeholder/simulated text file, use standardized mock sizes
                         fileLength = when {
-                            archiveId.contains("wikipedia", ignoreCase = true) -> 2147483648L // 2.0 GB representation
+                            archiveId.contains("wikipedia", ignoreCase = true) -> 13958643712L // 13 GB representation
                             archiveId.contains("wikiquote", ignoreCase = true) -> 152043520L // 145 MB representation
                             else -> 131072000L // 125 MB fallback representation
                         }

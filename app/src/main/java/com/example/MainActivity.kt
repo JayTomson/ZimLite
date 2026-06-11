@@ -1327,8 +1327,8 @@ fun SettingsScreen(
                         Spacer(modifier = Modifier.height(10.dp))
                         
                         DownloadArchiveRow(
-                            title = "Wikipedia RU (Русская)",
-                            info = "Статьи без картинок (~2 ГБ)",
+                            title = "Wikipedia RU",
+                            info = "Статьи без картинок (~13 ГБ)",
                             onDownload = {
                                 viewModel.downloadDefaultArchive(
                                     url = defaultWikiUrl,
@@ -1344,7 +1344,7 @@ fun SettingsScreen(
                         Spacer(modifier = Modifier.height(12.dp))
 
                         DownloadArchiveRow(
-                            title = "Wikiquote RU (Русский)",
+                            title = "Wikiquote RU",
                             info = "Сборник цитат (~145 МБ)",
                             onDownload = {
                                 viewModel.downloadDefaultArchive(
