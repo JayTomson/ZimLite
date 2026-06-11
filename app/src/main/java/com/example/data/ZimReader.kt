@@ -494,4 +494,126 @@ object ZimReader {
         }
         return result
     }
+
+    /**
+     * Индексирует все статьи из ZIM-архива, вызывая onBatch каждые batchSize статей.
+     * Читает только заголовок (title) и URL — не читает HTML-контент на больших базах.
+     */
+    fun indexAllArticles(
+        context: Context,
+        pathOrUri: String,
+        archiveId: String,
+        archiveTitle: String,
+        batchSize: Int = 1000,
+        onBatch: (List<ArticleEntity>) -> Unit,
+        onProgress: (indexed: Int, total: Int) -> Unit
+    ) {
+        try {
+            openSource(context, pathOrUri).use { source ->
+                val header = readHeader(source)
+                val total = header.articleCount
+                val batch = ArrayList<ArticleEntity>(batchSize)
+                
+                // Dynamic decision on whether to extract excerpts during indexing to prevent severe disk IO thrashing on massive ZIMs
+                val shouldExtractExcerpts = total <= 30000
+
+                for (i in 0 until total) {
+                    if (i % 1000 == 0) {
+                        onProgress(i, total)
+                    }
+
+                    source.seek(header.urlPtrPos + i * 8L)
+                    val entryOffset = readLELong(source)
+                    val entry = try {
+                        readDirectoryEntry(source, entryOffset)
+                    } catch (e: Exception) {
+                        continue
+                    }
+
+                    // Пропускаем не-статьи
+                    val isArticleNamespace = entry.namespace == 'A' || entry.namespace == 'a'
+                    val isNotRedirect = entry.mimeType != 0xFFFF
+                    if (!isArticleNamespace || !isNotRedirect) continue
+                    if (entry.title.isEmpty()) continue
+                    
+                    val isOkTitle = !entry.title.startsWith("Category:") &&
+                            !entry.title.startsWith("Категория:") &&
+                            !entry.title.startsWith("Шаблон:") &&
+                            !entry.title.startsWith("Template:") &&
+                            !entry.title.startsWith("File:") &&
+                            !entry.title.startsWith("Файл:") &&
+                            !entry.title.startsWith("MediaWiki:") &&
+                            !entry.title.startsWith("Portal:") &&
+                            !entry.title.startsWith("Портал:")
+
+                    if (!isOkTitle) continue
+
+                    // Читаем короткий excerpt (~150 символов) если база небольшая, иначе берем быстрый шаблон
+                    val excerpt = if (shouldExtractExcerpts) {
+                        try {
+                            extractExcerpt(context, pathOrUri, entry, header, maxChars = 150)
+                        } catch (e: Exception) {
+                            ""
+                        }
+                    } else {
+                        "Статья из архива: ${entry.title}"
+                    }
+
+                    batch.add(
+                        ArticleEntity(
+                            id = "${archiveId}_${entry.url}",
+                            archiveId = archiveId,
+                            archiveTitle = archiveTitle,
+                            url = "A/${entry.url}",
+                            title = entry.title,
+                            category = "Статья",
+                            excerpt = excerpt.ifBlank { "Статья из архива: ${entry.title}" },
+                            htmlContent = "", // HTML грузится лениво при открытии
+                            isFeedCandidate = true
+                        )
+                    )
+
+                    if (batch.size >= batchSize) {
+                        onBatch(ArrayList(batch))
+                        batch.clear()
+                    }
+                }
+
+                // Последний батч
+                if (batch.isNotEmpty()) {
+                    onBatch(batch)
+                }
+
+                onProgress(total, total)
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    /**
+     * Читает только начало HTML-контента статьи и вырезает первые maxChars символов текста.
+     */
+    private fun extractExcerpt(
+        context: Context,
+        pathOrUri: String,
+        entry: DirectoryEntry,
+        header: ZimHeader,
+        maxChars: Int
+    ): String {
+        if (entry.clusterNumber < 0 || entry.blobNumber < 0) return ""
+
+        val html = getHtmlForArticle(context, pathOrUri, entry, header)
+        if (html.isEmpty()) return ""
+
+        return try {
+            val text = android.text.Html.fromHtml(html, android.text.Html.FROM_HTML_MODE_LEGACY)
+                .toString()
+                .replace(Regex("\\s+"), " ")
+                .trim()
+            if (text.length > maxChars) text.take(maxChars) + "…" else text
+        } catch (e: Exception) {
+            ""
+        }
+    }
 }

@@ -40,6 +40,20 @@ interface ArticleDao {
     @Query("SELECT * FROM articles WHERE isFeedCandidate = 1 ORDER BY RANDOM() LIMIT :limit")
     fun getRandomFeedArticles(limit: Int): Flow<List<ArticleEntity>>
 
+    @Query("SELECT * FROM articles WHERE isFeedCandidate = 1 LIMIT :limit OFFSET :offset")
+    suspend fun getFeedPage(limit: Int, offset: Int): List<ArticleEntity>
+
+    @Query("SELECT COUNT(*) FROM articles WHERE isFeedCandidate = 1")
+    suspend fun getFeedCount(): Int
+
+    @Query("""
+        SELECT articles.* FROM articles 
+        JOIN articles_fts ON articles.rowid = articles_fts.rowid
+        WHERE articles_fts MATCH :query
+        LIMIT :limit
+    """)
+    suspend fun searchArticlesFts(query: String, limit: Int = 50): List<ArticleEntity>
+
     @Query("SELECT * FROM articles WHERE id = :id LIMIT 1")
     suspend fun getArticleById(id: String): ArticleEntity?
 
@@ -68,7 +82,7 @@ interface BookmarkDao {
     suspend fun deleteBookmarkById(id: String)
 }
 
-@Database(entities = [ArchiveEntity::class, ArticleEntity::class, BookmarkEntity::class], version = 1, exportSchema = false)
+@Database(entities = [ArchiveEntity::class, ArticleEntity::class, ArticleFts::class, BookmarkEntity::class], version = 2, exportSchema = false)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun archiveDao(): ArchiveDao
     abstract fun articleDao(): ArticleDao
@@ -84,7 +98,9 @@ abstract class AppDatabase : RoomDatabase() {
                     context.applicationContext,
                     AppDatabase::class.java,
                     "kiwix_lite_db"
-                ).build()
+                )
+                .fallbackToDestructiveMigration()
+                .build()
                 INSTANCE = instance
                 instance
             }

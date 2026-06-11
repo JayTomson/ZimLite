@@ -22,6 +22,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -343,7 +344,7 @@ fun ZimLiteApp(viewModel: MainViewModel) {
             }
         }
 
-        // Dim background and circular indices indexer overlay
+        // Dim background and linear progress indexer overlay with livedata metrics
         val isIndexing by viewModel.isIndexing.collectAsStateWithLifecycle()
         if (isIndexing) {
             Box(
@@ -362,19 +363,47 @@ fun ZimLiteApp(viewModel: MainViewModel) {
                         modifier = Modifier.padding(24.dp),
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
-                        CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
-                        Spacer(modifier = Modifier.height(16.dp))
+                        val progress by viewModel.indexingProgress.collectAsStateWithLifecycle()
+                        val total by viewModel.indexingTotal.collectAsStateWithLifecycle()
+
+                        if (total > 0) {
+                            val fraction = progress.toFloat() / total
+                            LinearProgressIndicator(
+                                progress = { fraction },
+                                color = MaterialTheme.colorScheme.primary,
+                                trackColor = MaterialTheme.colorScheme.primaryContainer,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                            Spacer(modifier = Modifier.height(16.dp))
+                            Text(
+                                text = "Индексация: $progress / $total статей",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 16.sp,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "${(fraction * 100).toInt()}%",
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        } else {
+                            CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
+                            Spacer(modifier = Modifier.height(16.dp))
+                            Text(
+                                text = "Индексация архива...",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 18.sp,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(8.dp))
                         Text(
-                            text = "Индексация архива...",
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 18.sp,
-                            color = MaterialTheme.colorScheme.onSurface
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = "Распаковываем и строим поисковый индекс в памяти.",
+                            text = "Распаковываем и строим быстрый полнотекстовый индекс. Это может занять пару минут.",
                             textAlign = TextAlign.Center,
-                            fontSize = 13.sp,
+                            fontSize = 12.sp,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
@@ -443,6 +472,24 @@ fun FeedScreen(viewModel: MainViewModel) {
     val feedArticles by viewModel.feedArticles.collectAsStateWithLifecycle()
     val archives by viewModel.archives.collectAsStateWithLifecycle()
     val isIndexing by viewModel.isIndexing.collectAsStateWithLifecycle()
+    val isFeedLoadingMore by viewModel.isFeedLoadingMore.collectAsStateWithLifecycle()
+
+    val listState = rememberLazyListState()
+
+    // Dynamic decision on loading more feed items as we scroll near the end
+    val shouldLoadMore by remember {
+        derivedStateOf {
+            val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+            val total = listState.layoutInfo.totalItemsCount
+            lastVisible >= total - 5 // Trigger when there are 5 cards left in the list
+        }
+    }
+
+    LaunchedEffect(shouldLoadMore) {
+        if (shouldLoadMore && feedArticles.isNotEmpty()) {
+            viewModel.loadMoreFeed()
+        }
+    }
 
     Column(modifier = Modifier.fillMaxSize()) {
         if (isIndexing) {
@@ -511,16 +558,33 @@ fun FeedScreen(viewModel: MainViewModel) {
             }
         } else {
             LazyColumn(
+                state = listState,
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 120.dp),
                 verticalArrangement = Arrangement.spacedBy(16.dp)
             ) {
-                items(feedArticles) { article ->
+                items(feedArticles, key = { it.id }) { article ->
                     FeedCard(
                         article = article,
                         viewModel = viewModel,
                         onClick = { viewModel.selectArticle(article) }
                     )
+                }
+
+                if (isFeedLoadingMore) {
+                    item {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(16.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            CircularProgressIndicator(
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(32.dp)
+                            )
+                        }
+                    }
                 }
             }
         }

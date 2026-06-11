@@ -1,6 +1,7 @@
 package com.example.data
 
 import androidx.room.Entity
+import androidx.room.Fts4
 import androidx.room.PrimaryKey
 
 @Entity(tableName = "archives")
@@ -28,6 +29,13 @@ data class ArticleEntity(
     val excerpt: String,
     val htmlContent: String,
     val isFeedCandidate: Boolean = false
+)
+
+@Fts4(contentEntity = ArticleEntity::class)
+@Entity(tableName = "articles_fts")
+data class ArticleFts(
+    val title: String,
+    val excerpt: String
 )
 
 @Entity(tableName = "bookmarks")
