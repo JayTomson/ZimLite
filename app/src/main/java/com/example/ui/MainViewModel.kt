@@ -56,18 +56,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 flowOf(emptyList())
             } else {
                 flow {
-                    // FTS query with asterisk prefix/suffix robust matching
-                    val ftsQuery = "\"${cleanQuery.replace("\"", "")}\" OR ${cleanQuery}*"
-                    val results = withContext(Dispatchers.IO) {
-                        try {
-                            articleDao.searchArticlesFts(ftsQuery, limit = 50)
-                        } catch (e: Exception) {
-                            e.printStackTrace()
-                            // Simple fallback query
-                            articleDao.searchArticles("%$cleanQuery%").first()
+                    val ftsQuery = cleanQuery
+                        .split("\\s+".toRegex())
+                        .filter { it.isNotEmpty() }
+                        .joinToString(" ") { token ->
+                            val safe = token.replace("\"", "").replace("*", "").replace("(", "").replace(")", "")
+                            if (safe.isEmpty()) "" else safe
                         }
+                        .trim()
+
+                    if (ftsQuery.isEmpty()) {
+                        emit(emptyList())
+                    } else {
+                        val results = withContext(Dispatchers.IO) {
+                            try {
+                                articleDao.searchArticlesFts(ftsQuery, limit = 50)
+                            } catch (e: Exception) {
+                                e.printStackTrace()
+                                articleDao.searchArticles("%$cleanQuery%").first()
+                            }
+                        }
+                        emit(results)
                     }
-                    emit(results)
                 }
             }
         }
@@ -103,13 +113,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         // Initialize Feed reactively. If archives are empty, clear the feed, otherwise refresh with random entries.
         viewModelScope.launch {
-            archives.collect { list ->
-                if (list.isEmpty()) {
-                    _feedArticles.value = emptyList()
-                } else {
-                    refreshFeed()
+            archives
+                .map { it.size }
+                .distinctUntilChanged()
+                .collect { count ->
+                    if (count == 0) {
+                        _feedArticles.value = emptyList()
+                    } else {
+                        refreshFeed()
+                    }
                 }
-            }
         }
     }
 
@@ -152,7 +165,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     // Pagination & Random starting positions
     private val feedOffset = MutableStateFlow(0)
-    val isFeedLoadingMore = MutableStateFlow(false)
+    private val _isFeedLoadingMore = MutableStateFlow(false)
+    val isFeedLoadingMore: StateFlow<Boolean> = _isFeedLoadingMore.asStateFlow()
     private val PAGE_SIZE = 30
     private var randomStartOffset = 0
 
@@ -184,10 +198,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun loadMoreFeed() {
-        if (isFeedLoadingMore.value) return
+        if (!_isFeedLoadingMore.compareAndSet(false, true)) return
         viewModelScope.launch {
             try {
-                isFeedLoadingMore.value = true
                 val nextOffsetOffset = feedOffset.value + PAGE_SIZE
                 val totalCount = withContext(Dispatchers.IO) {
                     articleDao.getFeedCount()
@@ -195,7 +208,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 
                 // If we reached the end of the total indexed articles database, don't load more
                 if (randomStartOffset + nextOffsetOffset >= totalCount) {
-                    isFeedLoadingMore.value = false
                     return@launch
                 }
                 
@@ -209,7 +221,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             } catch (e: Exception) {
                 e.printStackTrace()
             } finally {
-                isFeedLoadingMore.value = false
+                _isFeedLoadingMore.value = false
             }
         }
     }
@@ -303,8 +315,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         cleanNameForFallback: String
     ): Int {
         var totalArticleCount = 0
-        // Clear old articles if any
+        // Clear old articles and FTS if any
         articleDao.deleteArticlesByArchive(archiveId)
+        articleDao.deleteFtsByArchive(archiveId)
 
         if (isRealZim) {
             ZimReader.indexAllArticles(
@@ -315,7 +328,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 batchSize = 1000,
                 onBatch = { batch ->
                     // Insert batch synchronously on caller's IO thread
-                    runBlocking { articleDao.insertArticles(batch) }
+                    runBlocking {
+                        articleDao.insertArticles(batch)
+                        val ftsBatch = batch.map {
+                            ArticleFts(
+                                articleId = it.id,
+                                title = it.title,
+                                excerpt = it.excerpt,
+                                archiveId = it.archiveId
+                            )
+                        }
+                        articleDao.insertArticlesFts(ftsBatch)
+                    }
                     totalArticleCount += batch.size
                 },
                 onProgress = { indexed, total ->
@@ -339,6 +363,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 )
             }
             articleDao.insertArticles(preloaded)
+            val ftsPreloaded = preloaded.map {
+                ArticleFts(
+                    articleId = it.id,
+                    title = it.title,
+                    excerpt = it.excerpt,
+                    archiveId = it.archiveId
+                )
+            }
+            articleDao.insertArticlesFts(ftsPreloaded)
             totalArticleCount = preloaded.size
         }
         return totalArticleCount
@@ -470,6 +503,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             withContext(Dispatchers.IO) {
                 // 1. Delete articles belonging to this archive
                 articleDao.deleteArticlesByArchive(archiveId)
+                articleDao.deleteFtsByArchive(archiveId)
                 // 2. Delete the archive itself
                 archiveDao.deleteArchiveById(archiveId)
                 

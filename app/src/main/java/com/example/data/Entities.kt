@@ -1,5 +1,6 @@
 package com.example.data
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.Fts4
 import androidx.room.PrimaryKey
@@ -31,11 +32,16 @@ data class ArticleEntity(
     val isFeedCandidate: Boolean = false
 )
 
-@Fts4(contentEntity = ArticleEntity::class)
+@Fts4
 @Entity(tableName = "articles_fts")
 data class ArticleFts(
+    @PrimaryKey
+    @ColumnInfo(name = "rowid")
+    val rowid: Int = 0,
+    val articleId: String,
     val title: String,
-    val excerpt: String
+    val excerpt: String,
+    val archiveId: String
 )
 
 @Entity(tableName = "bookmarks")

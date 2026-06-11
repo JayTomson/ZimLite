@@ -40,15 +40,15 @@ interface ArticleDao {
     @Query("SELECT * FROM articles WHERE isFeedCandidate = 1 ORDER BY RANDOM() LIMIT :limit")
     fun getRandomFeedArticles(limit: Int): Flow<List<ArticleEntity>>
 
-    @Query("SELECT * FROM articles WHERE isFeedCandidate = 1 LIMIT :limit OFFSET :offset")
+    @Query("SELECT * FROM articles WHERE isFeedCandidate = 1 ORDER BY rowid LIMIT :limit OFFSET :offset")
     suspend fun getFeedPage(limit: Int, offset: Int): List<ArticleEntity>
 
     @Query("SELECT COUNT(*) FROM articles WHERE isFeedCandidate = 1")
     suspend fun getFeedCount(): Int
 
     @Query("""
-        SELECT articles.* FROM articles 
-        JOIN articles_fts ON articles.rowid = articles_fts.rowid
+        SELECT a.* FROM articles a
+        INNER JOIN articles_fts ON a.id = articles_fts.articleId
         WHERE articles_fts MATCH :query
         LIMIT :limit
     """)
@@ -63,8 +63,14 @@ interface ArticleDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertArticles(articles: List<ArticleEntity>)
 
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertArticlesFts(items: List<ArticleFts>)
+
     @Query("DELETE FROM articles WHERE archiveId = :archiveId")
     suspend fun deleteArticlesByArchive(archiveId: String)
+
+    @Query("DELETE FROM articles_fts WHERE archiveId = :archiveId")
+    suspend fun deleteFtsByArchive(archiveId: String)
 }
 
 @Dao
@@ -82,7 +88,7 @@ interface BookmarkDao {
     suspend fun deleteBookmarkById(id: String)
 }
 
-@Database(entities = [ArchiveEntity::class, ArticleEntity::class, ArticleFts::class, BookmarkEntity::class], version = 2, exportSchema = false)
+@Database(entities = [ArchiveEntity::class, ArticleEntity::class, ArticleFts::class, BookmarkEntity::class], version = 3, exportSchema = false)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun archiveDao(): ArchiveDao
     abstract fun articleDao(): ArticleDao

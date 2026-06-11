@@ -479,31 +479,55 @@ fun FeedScreen(viewModel: MainViewModel) {
     // Dynamic decision on loading more feed items as we scroll near the end
     val shouldLoadMore by remember {
         derivedStateOf {
-            val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+            val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
             val total = listState.layoutInfo.totalItemsCount
-            lastVisible >= total - 5 // Trigger when there are 5 cards left in the list
+            total > 0 && lastVisible >= total - 5 // Trigger when there are 5 cards left in the list
         }
     }
 
     LaunchedEffect(shouldLoadMore) {
-        if (shouldLoadMore && feedArticles.isNotEmpty()) {
+        if (shouldLoadMore) {
             viewModel.loadMoreFeed()
         }
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
         if (isIndexing) {
+            val progress by viewModel.indexingProgress.collectAsStateWithLifecycle()
+            val total by viewModel.indexingTotal.collectAsStateWithLifecycle()
+
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                    modifier = Modifier.padding(32.dp)
                 ) {
-                    CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
-                    Text(
-                        text = "Индексация статей...",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    if (total > 0) {
+                        val fraction = progress.toFloat() / total
+                        LinearProgressIndicator(
+                            progress = { fraction },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = "Индексация: $progress / $total статей",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Text(
+                            text = "${(fraction * 100).toInt()}%",
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    } else {
+                        CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
+                        Text(
+                            text = "Индексация архива...",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
             }
         } else if (archives.isEmpty()) {
