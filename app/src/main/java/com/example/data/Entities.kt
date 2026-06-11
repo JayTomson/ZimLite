@@ -35,9 +35,6 @@ data class ArticleEntity(
 @Fts4
 @Entity(tableName = "articles_fts")
 data class ArticleFts(
-    @PrimaryKey
-    @ColumnInfo(name = "rowid")
-    val rowid: Int = 0,
     val articleId: String,
     val title: String,
     val excerpt: String,

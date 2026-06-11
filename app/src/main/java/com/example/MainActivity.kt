@@ -472,24 +472,8 @@ fun FeedScreen(viewModel: MainViewModel) {
     val feedArticles by viewModel.feedArticles.collectAsStateWithLifecycle()
     val archives by viewModel.archives.collectAsStateWithLifecycle()
     val isIndexing by viewModel.isIndexing.collectAsStateWithLifecycle()
-    val isFeedLoadingMore by viewModel.isFeedLoadingMore.collectAsStateWithLifecycle()
 
     val listState = rememberLazyListState()
-
-    // Dynamic decision on loading more feed items as we scroll near the end
-    val shouldLoadMore by remember {
-        derivedStateOf {
-            val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
-            val total = listState.layoutInfo.totalItemsCount
-            total > 0 && lastVisible >= total - 5 // Trigger when there are 5 cards left in the list
-        }
-    }
-
-    LaunchedEffect(shouldLoadMore) {
-        if (shouldLoadMore) {
-            viewModel.loadMoreFeed()
-        }
-    }
 
     Column(modifier = Modifier.fillMaxSize()) {
         if (isIndexing) {
@@ -593,22 +577,6 @@ fun FeedScreen(viewModel: MainViewModel) {
                         viewModel = viewModel,
                         onClick = { viewModel.selectArticle(article) }
                     )
-                }
-
-                if (isFeedLoadingMore) {
-                    item {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(16.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            CircularProgressIndicator(
-                                color = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.size(32.dp)
-                            )
-                        }
-                    }
                 }
             }
         }

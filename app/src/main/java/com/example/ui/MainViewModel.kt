@@ -163,65 +163,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    // Pagination & Random starting positions
-    private val feedOffset = MutableStateFlow(0)
-    private val _isFeedLoadingMore = MutableStateFlow(false)
-    val isFeedLoadingMore: StateFlow<Boolean> = _isFeedLoadingMore.asStateFlow()
-    private val PAGE_SIZE = 30
-    private var randomStartOffset = 0
-
     fun refreshFeed() {
         viewModelScope.launch {
             try {
-                feedOffset.value = 0
-                val totalCount = withContext(Dispatchers.IO) {
-                    articleDao.getFeedCount()
+                var randomArticles = withContext(Dispatchers.IO) {
+                    articleDao.getRandomFeed(limit = 10)
                 }
-                randomStartOffset = if (totalCount > PAGE_SIZE) {
-                    (0 until (totalCount - PAGE_SIZE)).random()
-                } else {
-                    0
-                }
-                
-                var firstPage = withContext(Dispatchers.IO) {
-                    articleDao.getFeedPage(limit = PAGE_SIZE, offset = randomStartOffset)
-                }
-                if (firstPage.isEmpty()) {
+                if (randomArticles.isEmpty()) {
                     // Fallback to preloaded standard list
-                    firstPage = articleDao.getAllArticles().first().shuffled().take(PAGE_SIZE)
+                    randomArticles = withContext(Dispatchers.IO) {
+                        try {
+                            articleDao.getAllArticles().first().shuffled().take(10)
+                        } catch (e: Exception) {
+                            emptyList()
+                        }
+                    }
                 }
-                _feedArticles.value = firstPage
+                _feedArticles.value = randomArticles
             } catch (e: Exception) {
                 e.printStackTrace()
-            }
-        }
-    }
-
-    fun loadMoreFeed() {
-        if (!_isFeedLoadingMore.compareAndSet(false, true)) return
-        viewModelScope.launch {
-            try {
-                val nextOffsetOffset = feedOffset.value + PAGE_SIZE
-                val totalCount = withContext(Dispatchers.IO) {
-                    articleDao.getFeedCount()
-                }
-                
-                // If we reached the end of the total indexed articles database, don't load more
-                if (randomStartOffset + nextOffsetOffset >= totalCount) {
-                    return@launch
-                }
-                
-                val nextPage = withContext(Dispatchers.IO) {
-                    articleDao.getFeedPage(limit = PAGE_SIZE, offset = randomStartOffset + nextOffsetOffset)
-                }
-                if (nextPage.isNotEmpty()) {
-                    _feedArticles.value = _feedArticles.value + nextPage
-                    feedOffset.value = nextOffsetOffset
-                }
-            } catch (e: Exception) {
-                e.printStackTrace()
-            } finally {
-                _isFeedLoadingMore.value = false
             }
         }
     }
@@ -327,19 +287,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 archiveTitle = archiveTitle,
                 batchSize = 1000,
                 onBatch = { batch ->
-                    // Insert batch synchronously on caller's IO thread
-                    runBlocking {
-                        articleDao.insertArticles(batch)
-                        val ftsBatch = batch.map {
-                            ArticleFts(
-                                articleId = it.id,
-                                title = it.title,
-                                excerpt = it.excerpt,
-                                archiveId = it.archiveId
-                            )
-                        }
-                        articleDao.insertArticlesFts(ftsBatch)
+                    articleDao.insertArticles(batch)
+                    val ftsBatch = batch.map {
+                        ArticleFts(
+                            articleId = it.id,
+                            title = it.title,
+                            excerpt = it.excerpt,
+                            archiveId = it.archiveId
+                        )
                     }
+                    articleDao.insertArticlesFts(ftsBatch)
                     totalArticleCount += batch.size
                 },
                 onProgress = { indexed, total ->
@@ -545,9 +502,44 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 url
             }
             val cleanUrl = decodedUrl.trim().removePrefix("/")
-            val foundArticle = withContext(Dispatchers.IO) {
+            var foundArticle = withContext(Dispatchers.IO) {
                 articleDao.getArticleByUrl(archiveId, cleanUrl)
             }
+            
+            if (foundArticle == null) {
+                // Try searching with capitalized prefix or standard formats
+                val cleanUrlVariant = if (cleanUrl.startsWith("A/")) cleanUrl else "A/$cleanUrl"
+                foundArticle = withContext(Dispatchers.IO) {
+                    articleDao.getArticleByUrl(archiveId, cleanUrlVariant)
+                }
+            }
+            
+            if (foundArticle == null) {
+                // Dynamic fallback loader: try to load straight from the ZIM archive on-the-fly!
+                val archive = withContext(Dispatchers.IO) {
+                    archiveDao.getArchiveById(archiveId)
+                }
+                if (archive != null) {
+                    val html = withContext(Dispatchers.IO) {
+                        ZimReader.getHtmlByUrl(getApplication(), archive.filePath, cleanUrl)
+                    }
+                    if (html.isNotEmpty()) {
+                        val title = cleanUrl.substringAfterLast("/").substringBeforeLast(".").replace("_", " ")
+                        foundArticle = ArticleEntity(
+                            id = "${archiveId}_${cleanUrl}",
+                            archiveId = archiveId,
+                            archiveTitle = archive.title,
+                            url = cleanUrl,
+                            title = title,
+                            category = "Статья",
+                            excerpt = "Динамический просмотр статьи",
+                            htmlContent = html,
+                            isFeedCandidate = false
+                        )
+                    }
+                }
+            }
+            
             if (foundArticle != null) {
                 activeArticle.value = foundArticle
             }

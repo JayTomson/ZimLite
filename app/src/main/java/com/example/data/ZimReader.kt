@@ -305,27 +305,93 @@ object ZimReader {
             openSource(context, pathOrUri).use { source ->
                 val header = readHeader(source)
                 
-                // Remove prefix namespace from query to match url table lookup
-                val targetQuery = if (targetUrl.startsWith("A/")) targetUrl.substring(2) else targetUrl
+                // We'll prepare multiple possible target search keys to make it extremely robust.
+                val searchKeys = LinkedHashSet<String>()
+                searchKeys.add(targetUrl) // e.g., "A/нварский_дождь"
                 
+                // Extract clean URL (without namespace)
+                val cleanUrl = if (targetUrl.contains("/")) targetUrl.substring(targetUrl.indexOf('/') + 1) else targetUrl
+                
+                // Add common variants
+                searchKeys.add("A/$cleanUrl")
+                searchKeys.add("a/$cleanUrl")
+                
+                for (key in searchKeys) {
+                    var low = 0
+                    var high = header.articleCount - 1
+                    
+                    while (low <= high) {
+                        val mid = (low + high) ushr 1
+                        source.seek(header.urlPtrPos + mid * 8)
+                        val entryOffset = readLELong(source)
+                        
+                        // Read namespace at offset 3 of directory entry
+                        source.seek(entryOffset + 3)
+                        val nsChar = source.read().toChar()
+                        
+                        // Read url at offset 8 of directory entry
+                        source.seek(entryOffset + 8)
+                        val rawUrl = readNullTerminatedString(source)
+                        
+                        // Construct comparison key matching namespace + "/" + rawUrl structure
+                        val entryUrlNormalized = if (rawUrl.startsWith("$nsChar/", ignoreCase = true)) {
+                            rawUrl
+                        } else if (rawUrl.startsWith("$nsChar", ignoreCase = true)) {
+                            "$nsChar/${rawUrl.substring(1)}"
+                        } else {
+                            "$nsChar/$rawUrl"
+                        }
+                        
+                        val comp = entryUrlNormalized.compareTo(key, ignoreCase = true)
+                        if (comp < 0) {
+                            low = mid + 1
+                        } else if (comp > 0) {
+                            high = mid - 1
+                        } else {
+                            val entry = readDirectoryEntry(source, entryOffset)
+                            val html = getHtmlForArticle(context, pathOrUri, entry, header)
+                            if (html.isNotEmpty()) return html
+                        }
+                    }
+                }
+                
+                // Direct fallback: if binary search fails because of some weird encoding/sorting mismatch,
+                // try to query directly by comparing rawUrl and cleanUrl
                 var low = 0
                 var high = header.articleCount - 1
-                
                 while (low <= high) {
                     val mid = (low + high) ushr 1
                     source.seek(header.urlPtrPos + mid * 8)
                     val entryOffset = readLELong(source)
                     source.seek(entryOffset + 8)
-                    val url = readNullTerminatedString(source)
+                    val rawUrl = readNullTerminatedString(source)
                     
-                    val comp = url.compareTo(targetQuery)
+                    val comp = rawUrl.compareTo(cleanUrl, ignoreCase = true)
                     if (comp < 0) {
                         low = mid + 1
                     } else if (comp > 0) {
                         high = mid - 1
                     } else {
                         val entry = readDirectoryEntry(source, entryOffset)
-                        return getHtmlForArticle(context, pathOrUri, entry, header)
+                        val html = getHtmlForArticle(context, pathOrUri, entry, header)
+                        if (html.isNotEmpty()) return html
+                    }
+                }
+                
+                // Ultimate linear scan backup for a small number of items if binary search inexplicably fails
+                // (Only do this for small archives or up to 2000 items to avoid freezing)
+                if (header.articleCount < 5000) {
+                    for (mid in 0 until header.articleCount) {
+                        source.seek(header.urlPtrPos + mid * 8L)
+                        val entryOffset = readLELong(source)
+                        source.seek(entryOffset + 8)
+                        val rawUrl = readNullTerminatedString(source)
+                        val cleanRawUrl = if (rawUrl.contains("/")) rawUrl.substring(rawUrl.indexOf('/') + 1) else rawUrl
+                        if (cleanRawUrl.equals(cleanUrl, ignoreCase = true)) {
+                            val entry = readDirectoryEntry(source, entryOffset)
+                            val html = getHtmlForArticle(context, pathOrUri, entry, header)
+                            if (html.isNotEmpty()) return html
+                        }
                     }
                 }
             }
@@ -379,21 +445,27 @@ object ZimReader {
                         val titleLower = entry.title.lowercase()
                         val urlLower = entry.url.lowercase()
                         
-                        if (titleLower.contains(cleanQuery) || urlLower.contains(cleanQuery)) {
-                            results.add(
-                                ArticleEntity(
-                                    id = "${archiveId}_${entry.url}",
-                                    archiveId = archiveId,
-                                    archiveTitle = archiveTitle,
-                                    url = "A/${entry.url}",
-                                    title = entry.title,
-                                    category = "Статья",
-                                    excerpt = "Статья по запросу из $archiveTitle",
-                                    htmlContent = "",
-                                    isFeedCandidate = false
-                                )
-                            )
+                        val entryUrl = entry.url
+                        val correctUrl = if (entryUrl.startsWith("${entry.namespace}/", ignoreCase = true)) {
+                            entryUrl
+                        } else if (entryUrl.startsWith("${entry.namespace}", ignoreCase = true)) {
+                            "${entry.namespace}/${entryUrl.substring(1)}"
+                        } else {
+                            "${entry.namespace}/$entryUrl"
                         }
+                        results.add(
+                            ArticleEntity(
+                                id = "${archiveId}_${entry.url}",
+                                archiveId = archiveId,
+                                archiveTitle = archiveTitle,
+                                url = correctUrl,
+                                title = entry.title,
+                                category = "Статья",
+                                excerpt = "Статья по запросу из $archiveTitle",
+                                htmlContent = "",
+                                isFeedCandidate = false
+                            )
+                        )
                     }
                 }
                 
@@ -411,13 +483,21 @@ object ZimReader {
                             val titleLower = entry.title.lowercase()
                             val urlLower = entry.url.lowercase()
                             
+                            val entryUrl = entry.url
+                            val correctUrl = if (entryUrl.startsWith("${entry.namespace}/", ignoreCase = true)) {
+                                entryUrl
+                            } else if (entryUrl.startsWith("${entry.namespace}", ignoreCase = true)) {
+                                "${entry.namespace}/${entryUrl.substring(1)}"
+                            } else {
+                                "${entry.namespace}/$entryUrl"
+                            }
                             if (titleLower.contains(cleanQuery) || urlLower.contains(cleanQuery)) {
                                 results.add(
                                     ArticleEntity(
                                         id = "${archiveId}_${entry.url}",
                                         archiveId = archiveId,
                                         archiveTitle = archiveTitle,
-                                        url = "A/${entry.url}",
+                                        url = correctUrl,
                                         title = entry.title,
                                         category = "Статья",
                                         excerpt = "Статья по запросу из $archiveTitle",
@@ -473,12 +553,20 @@ object ZimReader {
                             !entry.title.startsWith("Портал:")
                     
                     if (isArticleNamespace && isNotRedirect && isOkTitle) {
+                        val entryUrl = entry.url
+                        val correctUrl = if (entryUrl.startsWith("${entry.namespace}/", ignoreCase = true)) {
+                            entryUrl
+                        } else if (entryUrl.startsWith("${entry.namespace}", ignoreCase = true)) {
+                            "${entry.namespace}/${entryUrl.substring(1)}"
+                        } else {
+                            "${entry.namespace}/$entryUrl"
+                        }
                         result.add(
                             ArticleEntity(
                                 id = "${archiveId}_${entry.url}",
                                 archiveId = archiveId,
                                 archiveTitle = archiveTitle,
-                                url = "A/${entry.url}",
+                                url = correctUrl,
                                 title = entry.title,
                                 category = "Статья",
                                 excerpt = "Откройте для чтения статью из $archiveTitle",
@@ -499,14 +587,14 @@ object ZimReader {
      * Индексирует все статьи из ZIM-архива, вызывая onBatch каждые batchSize статей.
      * Читает только заголовок (title) и URL — не читает HTML-контент на больших базах.
      */
-    fun indexAllArticles(
+    suspend fun indexAllArticles(
         context: Context,
         pathOrUri: String,
         archiveId: String,
         archiveTitle: String,
         batchSize: Int = 1000,
-        onBatch: (List<ArticleEntity>) -> Unit,
-        onProgress: (indexed: Int, total: Int) -> Unit
+        onBatch: suspend (List<ArticleEntity>) -> Unit,
+        onProgress: suspend (indexed: Int, total: Int) -> Unit
     ) {
         try {
             openSource(context, pathOrUri).use { source ->
@@ -530,8 +618,10 @@ object ZimReader {
                         continue
                     }
 
-                    // Пропускаем не-статьи
-                    val isArticleNamespace = entry.namespace == 'A' || entry.namespace == 'a'
+                    // Пропускаем не-статьи (разрешаем 'A', 'a', 'C', 'c', '\u0000', '-', ' ')
+                    val isArticleNamespace = entry.namespace == 'A' || entry.namespace == 'a' || 
+                            entry.namespace == 'C' || entry.namespace == 'c' || 
+                            entry.namespace == '\u0000' || entry.namespace == '-' || entry.namespace == ' '
                     val isNotRedirect = entry.mimeType != 0xFFFF
                     if (!isArticleNamespace || !isNotRedirect) continue
                     if (entry.title.isEmpty()) continue
@@ -559,12 +649,21 @@ object ZimReader {
                         "Статья из архива: ${entry.title}"
                     }
 
+                    val entryUrl = entry.url
+                    val correctUrl = if (entryUrl.startsWith("${entry.namespace}/", ignoreCase = true)) {
+                        entryUrl
+                    } else if (entryUrl.startsWith("${entry.namespace}", ignoreCase = true)) {
+                        "${entry.namespace}/${entryUrl.substring(1)}"
+                    } else {
+                        "${entry.namespace}/$entryUrl"
+                    }
+
                     batch.add(
                         ArticleEntity(
                             id = "${archiveId}_${entry.url}",
                             archiveId = archiveId,
                             archiveTitle = archiveTitle,
-                            url = "A/${entry.url}",
+                            url = correctUrl,
                             title = entry.title,
                             category = "Статья",
                             excerpt = excerpt.ifBlank { "Статья из архива: ${entry.title}" },
