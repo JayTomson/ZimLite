@@ -3,6 +3,7 @@ package com.example.data
 import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.Fts4
+import androidx.room.FtsOptions
 import androidx.room.PrimaryKey
 
 @Entity(tableName = "archives")
@@ -32,7 +33,10 @@ data class ArticleEntity(
     val isFeedCandidate: Boolean = false
 )
 
-@Fts4
+@Fts4(
+    tokenizer = FtsOptions.TOKENIZER_UNICODE61,
+    tokenizerArgs = ["remove_diacritics=1"]
+)
 @Entity(tableName = "articles_fts")
 data class ArticleFts(
     val articleId: String,

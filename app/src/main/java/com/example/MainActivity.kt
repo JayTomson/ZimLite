@@ -87,6 +87,7 @@ fun ZimLiteApp(viewModel: MainViewModel) {
     val currentTab = viewModel.currentTab.value
     val insideSettings = viewModel.insideSettings.value
     val activeArticle = viewModel.activeArticle.value
+    val activeWebUrl = viewModel.activeWebUrl.value
     
     val archives by viewModel.archives.collectAsStateWithLifecycle()
 
@@ -114,6 +115,11 @@ fun ZimLiteApp(viewModel: MainViewModel) {
         uri?.let {
             viewModel.setCustomZimDir(it.toString())
         }
+    }
+
+    // Handle back button for bottom navigation tabs
+    androidx.activity.compose.BackHandler(enabled = currentTab != 0 && !insideSettings && activeArticle == null && activeWebUrl == null) {
+        viewModel.currentTab.value = 0
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
@@ -338,7 +344,7 @@ fun ZimLiteApp(viewModel: MainViewModel) {
                 ArticleReaderScreen(
                     viewModel = viewModel,
                     article = article,
-                    onBack = { viewModel.activeArticle.value = null }
+                    onBack = { viewModel.goBackArticle() }
                 )
             }
         }
@@ -1031,6 +1037,8 @@ fun SettingsScreen(
 
     var directUrlInput by remember { mutableStateOf("") }
     var showDeepIndexingConfirm by remember { mutableStateOf(false) }
+
+    androidx.activity.compose.BackHandler(onBack = { onClose() })
 
     if (showDeepIndexingConfirm) {
         AlertDialog(
@@ -1763,6 +1771,8 @@ fun ArticleReaderScreen(
     val bookmarkedIds by viewModel.bookmarkedIds.collectAsStateWithLifecycle()
     val isBookmarked = bookmarkedIds.contains(article.id)
 
+    androidx.activity.compose.BackHandler(onBack = { onBack() })
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -2039,6 +2049,14 @@ fun WebReaderScreen(
     var webProgress by remember { mutableStateOf(0) }
     var isLoading by remember { mutableStateOf(true) }
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
+
+    androidx.activity.compose.BackHandler {
+        if (webViewRef?.canGoBack() == true) {
+            webViewRef?.goBack()
+        } else {
+            onBack()
+        }
+    }
 
     Scaffold(
         topBar = {

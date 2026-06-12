@@ -38,6 +38,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val activeArticle = mutableStateOf<ArticleEntity?>(null)
     val activeWebUrl = mutableStateOf<String?>(null)
     val insideSettings = mutableStateOf(false)
+    val articleBackStack = mutableListOf<ArticleEntity>()
 
     // Database reactive flows
     val archives: StateFlow<List<ArchiveEntity>> = archiveDao.getAllArchives()
@@ -64,47 +65,150 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 flowOf(emptyList())
             } else {
                 flow {
-                    // Tokenize query for multi-word matching
                     val tokens = cleanQuery.split("\\s+".toRegex()).filter { it.isNotEmpty() }
-                    
-                    // Simple FTS query construction: word1* word2*
-                    val ftsQueryString = tokens.joinToString(" ") { "$it*" }
+                    val ftsQueryString = tokens.joinToString(" ") { "\"$it\"*" }
 
-                    // If user only wants Titles, we can use a more reliable LIKE-based multi-word search
-                    // especially for short Russian prefixes that FTS might treat weirdly as stopwords.
-                    val results = withContext(Dispatchers.IO) {
+                    val startsWithQ = "$cleanQuery%"
+                    val exactWordQ = cleanQuery
+                    val exactTitleQ = "%$cleanQuery%"
+
+                    // Phase 1: INSTANT TITLE SEARCH
+                    val titleResults = withContext(Dispatchers.IO) {
                         try {
-                            if (inContent) {
-                                // For content search, FTS is mandatory for performance
-                                if (ftsQueryString.isEmpty()) emptyList()
-                                else articleDao.searchArticlesFts(ftsQueryString, exactTitleQuery = "%$cleanQuery%", limit = 100)
+                            if (tokens.isEmpty()) {
+                                emptyList()
+                            } else if (tokens.size <= 3) {
+                                val w1 = "%${tokens[0]}%"
+                                val w2 = if (tokens.size > 1) "%${tokens[1]}%" else null
+                                val w3 = if (tokens.size > 2) "%${tokens[2]}%" else null
+                                articleDao.searchArticlesByTitleMulti(w1, w2, w3)
                             } else {
-                                // For titles only, we prioritize 100% reliability as requested
-                                if (tokens.isEmpty()) {
-                                    emptyList()
-                                } else if (tokens.size <= 3) {
-                                    // Use our 100% reliable LIKE multi-search for up to 3 words
-                                    val w1 = "%${tokens[0]}%"
-                                    val w2 = if (tokens.size > 1) "%${tokens[1]}%" else null
-                                    val w3 = if (tokens.size > 2) "%${tokens[2]}%" else null
-                                    articleDao.searchArticlesByTitleMulti(w1, w2, w3)
-                                } else {
-                                    // Fallback to FTS if many words, but scoped to title
-                                    val scopedFts = "title:($ftsQueryString)"
-                                    articleDao.searchArticlesFts(scopedFts, exactTitleQuery = "%$cleanQuery%", limit = 100)
-                                }
+                                emptyList()
                             }
                         } catch (e: Exception) {
-                            e.printStackTrace()
-                            // Absolute fallback to LIKE if anything fails
-                            articleDao.searchArticlesByTitle("%$cleanQuery%")
+                            emptyList()
                         }
                     }
-                    emit(results)
+                    if (titleResults.isNotEmpty()) {
+                        emit(titleResults)
+                    }
+
+                    // Phase 2: FULL CONTENT SEARCH IF ENABLED
+                    if (inContent) {
+                        val contentResults = withContext(Dispatchers.IO) {
+                            try {
+                                if (ftsQueryString.isEmpty()) emptyList()
+                                else articleDao.searchArticlesFts(
+                                    query = ftsQueryString,
+                                    exactTitleQuery = exactTitleQ,
+                                    startsWithQuery = startsWithQ,
+                                    exactWord = exactWordQ,
+                                    limit = 100
+                                )
+                            } catch (e: Exception) {
+                                e.printStackTrace()
+                                articleDao.searchArticlesByTitle(exactTitleQ)
+                            }
+                        }
+                        
+                        val merged = (titleResults + contentResults).distinctBy { it.id }
+                        emit(merged)
+
+                        // Fuzzy Search Fallback if completely empty
+                        if (merged.isEmpty() && cleanQuery.length >= 4) {
+                            val fuzzyResults = withContext(Dispatchers.IO) {
+                                val prefix = cleanQuery.take(3)
+                                val candidates = articleDao.searchArticlesByTitle("%$prefix%")
+                                candidates.filter { article ->
+                                    levenshtein(article.title.lowercase(), cleanQuery.lowercase()) <= 2
+                                }.sortedBy { levenshtein(it.title.lowercase(), cleanQuery.lowercase()) }.take(20)
+                            }
+                            if (fuzzyResults.isNotEmpty()) {
+                                emit(fuzzyResults)
+                            } else {
+                                // Transliteration search
+                                val cyrillicQuery = transliterateToRussian(cleanQuery)
+                                if (cyrillicQuery != cleanQuery) {
+                                    val translitResults = withContext(Dispatchers.IO) {
+                                        articleDao.searchArticlesByTitle("%$cyrillicQuery%")
+                                    }
+                                    if (translitResults.isNotEmpty()) {
+                                        emit(translitResults.distinctBy { it.id })
+                                    }
+                                }
+                            }
+                        } else if (merged.isNotEmpty()) {
+                            // Transliteration search even if we found something
+                            val cyrillicQuery = transliterateToRussian(cleanQuery)
+                            if (cyrillicQuery != cleanQuery) {
+                                val translitResults = withContext(Dispatchers.IO) {
+                                    articleDao.searchArticlesByTitle("%$cyrillicQuery%")
+                                }
+                                emit((merged + translitResults).distinctBy { it.id })
+                            }
+                        }
+                    } else if (titleResults.isEmpty() && cleanQuery.length >= 4) {
+                        // Fuzzy search fallback for title-only search
+                        val fuzzyResults = withContext(Dispatchers.IO) {
+                            val prefix = cleanQuery.take(3)
+                            val candidates = articleDao.searchArticlesByTitle("%$prefix%")
+                            candidates.filter { article ->
+                                levenshtein(article.title.lowercase(), cleanQuery.lowercase()) <= 2
+                            }.sortedBy { levenshtein(it.title.lowercase(), cleanQuery.lowercase()) }.take(20)
+                        }
+                        if (fuzzyResults.isNotEmpty()) {
+                            emit(fuzzyResults)
+                        } else {
+                            val cyrillicQuery = transliterateToRussian(cleanQuery)
+                            if (cyrillicQuery != cleanQuery) {
+                                val translitResults = withContext(Dispatchers.IO) {
+                                    articleDao.searchArticlesByTitle("%$cyrillicQuery%")
+                                }
+                                if (translitResults.isNotEmpty()) {
+                                    emit(translitResults.distinctBy { it.id })
+                                }
+                            }
+                        }
+                    } else if (titleResults.isNotEmpty()) {
+                        val cyrillicQuery = transliterateToRussian(cleanQuery)
+                        if (cyrillicQuery != cleanQuery) {
+                            val translitResults = withContext(Dispatchers.IO) {
+                                articleDao.searchArticlesByTitle("%$cyrillicQuery%")
+                            }
+                            emit((titleResults + translitResults).distinctBy { it.id })
+                        }
+                    }
                 }
             }
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    private val TRANSLIT = mapOf(
+        "a" to "а", "b" to "б", "v" to "в", "g" to "г", "d" to "д",
+        "e" to "е", "zh" to "ж", "z" to "з", "i" to "и", "k" to "к",
+        "l" to "л", "m" to "м", "n" to "н", "o" to "о", "p" to "п",
+        "r" to "р", "s" to "с", "t" to "т", "u" to "у", "f" to "ф",
+        "kh" to "х", "ts" to "ц", "ch" to "ч", "sh" to "ш", "shch" to "щ",
+        "ya" to "я", "yu" to "ю", "yo" to "ё"
+    )
+
+    private fun transliterateToRussian(input: String): String {
+        var result = input.lowercase()
+        TRANSLIT.entries.sortedByDescending { it.key.length }
+            .forEach { (lat, cyr) -> result = result.replace(lat, cyr) }
+        return result
+    }
+
+    private fun levenshtein(a: String, b: String): Int {
+        val dp = Array(a.length + 1) { IntArray(b.length + 1) }
+        for (i in 0..a.length) dp[i][0] = i
+        for (j in 0..b.length) dp[0][j] = j
+        for (i in 1..a.length) for (j in 1..b.length) {
+            dp[i][j] = if (a[i - 1] == b[j - 1]) dp[i - 1][j - 1]
+            else 1 + minOf(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1])
+        }
+        return dp[a.length][b.length]
+    }
 
     // Bookmark check helper
     private val _bookmarkedIds = MutableStateFlow<Set<String>>(emptySet())
@@ -267,6 +371,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun selectArticle(article: ArticleEntity) {
+        articleBackStack.clear()
         // Navigate immediately
         activeArticle.value = article
         
@@ -297,6 +402,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     activeArticle.value = article.copy(htmlContent = "<h3>Ошибка загрузки</h3><p>Не удалось загрузить содержимое статьи. Возможно, архив поврежден или статья отсутствует по указанному пути: ${article.url}</p>")
                 }
             }
+        }
+    }
+
+    fun goBackArticle() {
+        if (articleBackStack.isNotEmpty()) {
+            activeArticle.value = articleBackStack.removeAt(articleBackStack.size - 1)
+        } else {
+            activeArticle.value = null
         }
     }
 
@@ -705,6 +818,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             
             if (foundArticle != null) {
                 // Navigate immediately
+                activeArticle.value?.let { current ->
+                    articleBackStack.add(current)
+                }
                 activeArticle.value = foundArticle
                 
                 // If content is already there, we are done

@@ -671,107 +671,59 @@ object ZimReader {
     }
 
     fun searchArticlesInZim(context: Context, pathOrUri: String, query: String, archiveId: String, archiveTitle: String, limit: Int = 40): List<ArticleEntity> {
-        val results = ArrayList<ArticleEntity>()
+        val results = ArrayList<ArticleEntity>(limit)
         val cleanQuery = query.trim().lowercase()
         if (cleanQuery.isEmpty()) return emptyList()
-        
+
         try {
             openSource(context, pathOrUri).use { source ->
                 val header = readHeader(source)
+                
+                // Binary search by TITLE-index instead of URL-index
                 var low = 0
                 var high = header.articleCount - 1
                 var bestMatchIdx = -1
-                
+
                 while (low <= high) {
                     val mid = (low + high) ushr 1
-                    source.seek(header.urlPtrPos + mid * 8L)
+                    source.seek(header.titlePtrPos + mid * 4L)
+                    val articleIdx = readLEInt(source).toLong() and 0xFFFFFFFFL
+                    source.seek(header.urlPtrPos + articleIdx * 8L)
                     val entryOffset = readLELong(source)
                     val entry = readDirectoryEntry(source, entryOffset)
-                    val url = entry.url.lowercase()
-                    
-                    val cleanUrl = if (url.startsWith("a/")) url.substring(2) else url
-                    val comp = cleanUrl.compareTo(cleanQuery)
-                    if (comp >= 0) {
-                        bestMatchIdx = mid
-                        high = mid - 1
-                    } else {
-                        low = mid + 1
+
+                    val titleLower = entry.title.lowercase()
+                    val comp = titleLower.compareTo(cleanQuery)
+                    when {
+                        comp >= 0 -> { bestMatchIdx = mid; high = mid - 1 }
+                        else -> low = mid + 1
                     }
                 }
-                
+
+                // Scan forward from found position
                 val startIdx = if (bestMatchIdx != -1) bestMatchIdx else 0
-                var i = startIdx
-                val maxScan = 2000
-                var scanned = 0
-                while (i < header.articleCount && results.size < limit && scanned < maxScan) {
-                    scanned++
-                    source.seek(header.urlPtrPos + i * 8L)
+                for (i in startIdx until minOf(startIdx + 500, header.articleCount)) {
+                    if (results.size >= limit) break
+                    source.seek(header.titlePtrPos + i * 4L)
+                    val articleIdx = readLEInt(source).toLong() and 0xFFFFFFFFL
+                    source.seek(header.urlPtrPos + articleIdx * 8L)
                     val entryOffset = readLELong(source)
                     val entry = readDirectoryEntry(source, entryOffset)
-                    i++
-                    
-                    val isSupportedNamespace = entry.namespace == 'A' || entry.namespace == 'a' || 
-                            entry.namespace == 'C' || entry.namespace == 'c' || 
-                            entry.namespace == '\u0000' || entry.namespace == '-' || entry.namespace == ' '
-                    
-                    if (isSupportedNamespace && entry.mimeType != 0xFFFF && entry.title.isNotEmpty()) {
-                        val titleLower = entry.title.lowercase()
-                        val urlLower = entry.url.lowercase()
-                        
-                        if (titleLower.contains(cleanQuery) || urlLower.contains(cleanQuery)) {
-                            val correctUrl = "${entry.namespace}/${entry.url}"
-                            results.add(
-                                ArticleEntity(
-                                    id = "${archiveId}_${entry.namespace}_${entry.url}",
-                                    archiveId = archiveId,
-                                    archiveTitle = archiveTitle,
-                                    url = correctUrl,
-                                    title = entry.title,
-                                    category = if (entry.namespace == 'C' || entry.namespace == 'c') "Категория" else "Статья",
-                                    excerpt = "Найдено в $archiveTitle",
-                                    htmlContent = "",
-                                    isFeedCandidate = false
-                                )
-                            )
-                        }
-                    }
-                }
-                
-                if (results.size < limit) {
-                    var j = startIdx - 1
-                    var scannedBack = 0
-                    while (j >= 0 && results.size < limit && scannedBack < 1000) {
-                        scannedBack++
-                        source.seek(header.urlPtrPos + j * 8L)
-                        val entryOffset = readLELong(source)
-                        val entry = readDirectoryEntry(source, entryOffset)
-                        j--
-                        
-                        val isSupportedNamespace = entry.namespace == 'A' || entry.namespace == 'a' || 
-                                entry.namespace == 'C' || entry.namespace == 'c' || 
-                                entry.namespace == '\u0000' || entry.namespace == '-' || entry.namespace == ' '
-                        
-                        if (isSupportedNamespace && entry.mimeType != 0xFFFF && entry.title.isNotEmpty()) {
-                            val titleLower = entry.title.lowercase()
-                            val urlLower = entry.url.lowercase()
-                            
-                            if (titleLower.contains(cleanQuery) || urlLower.contains(cleanQuery)) {
-                                val correctUrl = "${entry.namespace}/${entry.url}"
-                                results.add(
-                                    ArticleEntity(
-                                        id = "${archiveId}_${entry.namespace}_${entry.url}",
-                                        archiveId = archiveId,
-                                        archiveTitle = archiveTitle,
-                                        url = correctUrl,
-                                        title = entry.title,
-                                        category = if (entry.namespace == 'C' || entry.namespace == 'c') "Категория" else "Статья",
-                                        excerpt = "Найдено в $archiveTitle",
-                                        htmlContent = "",
-                                        isFeedCandidate = false
-                                    )
-                                )
-                            }
-                        }
+
+                    if (!entry.title.lowercase().startsWith(cleanQuery)) break // out of bounds
+
+                    if (entry.namespace == 'A' || entry.namespace == 'a' || entry.namespace == 'C' || entry.namespace == 'c') {
+                        results.add(ArticleEntity(
+                            id = "${archiveId}_${entry.namespace}_${entry.url}",
+                            archiveId = archiveId,
+                            archiveTitle = archiveTitle,
+                            url = "${entry.namespace}/${entry.url}",
+                            title = entry.title,
+                            category = if (entry.namespace == 'C' || entry.namespace == 'c') "Категория" else "Статья",
+                            excerpt = "Найдено в $archiveTitle",
+                            htmlContent = "",
+                            isFeedCandidate = false
+                        ))
                     }
                 }
             }
