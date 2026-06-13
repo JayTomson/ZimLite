@@ -679,113 +679,237 @@ object ZimReader {
         limit: Int = 40
     ): List<ArticleEntity> {
         val results = ArrayList<ArticleEntity>(limit)
-        val cleanQuery = query.trim().lowercase()
+        val cleanQuery = query.trim()
         if (cleanQuery.isEmpty()) return emptyList()
 
-        // Разбиваем на токены для поиска по нескольким словам
-        val tokens = cleanQuery.split("\\s+".toRegex()).filter { it.isNotEmpty() }
-        val firstToken = tokens.first()
+        val originalTokens = cleanQuery.split("\\s+".toRegex()).filter { it.isNotEmpty() }
+        val originalFirstToken = originalTokens.first()
+        val cleanQueryLower = cleanQuery.lowercase()
+        val lowerTokens = cleanQueryLower.split("\\s+".toRegex()).filter { it.isNotEmpty() }
 
         try {
             openSource(context, pathOrUri).use { source ->
                 val header = readHeader(source)
 
-                // --- Шаг 1: бинарный поиск по title-pointer table (как в Kiwix) ---
-                // Title-pointer table хранит индексы статей, упорядоченные по title
-                var low = 0
-                var high = header.articleCount - 1
-                var bestMatchIdx = -1
-
-                while (low <= high) {
-                    val mid = (low + high) ushr 1
-                    source.seek(header.titlePtrPos + mid * 4L)
+                fun getTitleAt(pos: Int): String {
+                    if (header.titlePtrPos == 0L) return ""
+                    source.seek(header.titlePtrPos + pos * 4L)
                     val articleIdx = readLEInt(source).toLong() and 0xFFFFFFFFL
                     source.seek(header.urlPtrPos + articleIdx * 8L)
                     val entryOffset = readLELong(source)
-                    val entry = readDirectoryEntry(source, entryOffset)
-
-                    val titleLower = entry.title.lowercase()
-                    val comp = titleLower.compareTo(firstToken)
-                    when {
-                        comp >= 0 -> { bestMatchIdx = mid; high = mid - 1 }
-                        else -> low = mid + 1
-                    }
+                    return readDirectoryEntry(source, entryOffset).title
                 }
 
-                // --- Шаг 2: сканируем вперёд от найденной позиции ---
-                // Собираем startsWith-совпадения (как Kiwix — самые релевантные)
-                val startIdx = if (bestMatchIdx != -1) bestMatchIdx else 0
-                val scanLimit = minOf(startIdx + 500, header.articleCount)
-
-                for (i in startIdx until scanLimit) {
-                    if (results.size >= limit) break
-                    source.seek(header.titlePtrPos + i * 4L)
+                fun getEntryAt(pos: Int): DirectoryEntry? {
+                    if (header.titlePtrPos == 0L) return null
+                    source.seek(header.titlePtrPos + pos * 4L)
                     val articleIdx = readLEInt(source).toLong() and 0xFFFFFFFFL
                     source.seek(header.urlPtrPos + articleIdx * 8L)
                     val entryOffset = readLELong(source)
-                    val entry = readDirectoryEntry(source, entryOffset)
-
-                    val titleLower = entry.title.lowercase()
-
-                    // Проверяем: заголовок начинается с первого токена
-                    if (!titleLower.startsWith(firstToken)) break
-
-                    // Если несколько токенов — все должны присутствовать
-                    val matchesAllTokens = tokens.all { token -> titleLower.contains(token) }
-                    if (!matchesAllTokens) continue
-
-                    if (entry.namespace == 'A' || entry.namespace == 'a' ||
-                        entry.namespace == 'C' || entry.namespace == 'c') {
-                        results.add(ArticleEntity(
-                            id = "${archiveId}_${entry.namespace}_${entry.url}",
-                            archiveId = archiveId,
-                            archiveTitle = archiveTitle,
-                            url = "${entry.namespace}/${entry.url}",
-                            title = entry.title,
-                            category = if (entry.namespace == 'C' || entry.namespace == 'c') "Категория" else "Статья",
-                            excerpt = "Найдено в $archiveTitle",
-                            htmlContent = "",
-                            isFeedCandidate = false
-                        ))
-                    }
+                    return readDirectoryEntry(source, entryOffset)
                 }
 
-                // --- Шаг 3: если результатов мало — ищем contains по всей таблице ---
-                // (медленнее, но находит совпадения в середине заголовка)
-                if (results.size < 5) {
-                    val containsResults = ArrayList<ArticleEntity>()
-                    val alreadyFound = results.map { it.id }.toHashSet()
+                fun scanFrom(token: String) {
+                    if (header.titlePtrPos == 0L) return
+                    var low = 0
+                    var high = header.articleCount - 1
+                    var bestMatchIdx = -1
 
-                    for (i in 0 until header.articleCount) {
-                        if (containsResults.size + results.size >= limit) break
-                        source.seek(header.titlePtrPos + i * 4L)
-                        val articleIdx = readLEInt(source).toLong() and 0xFFFFFFFFL
-                        source.seek(header.urlPtrPos + articleIdx * 8L)
-                        val entryOffset = readLELong(source)
-                        val entry = readDirectoryEntry(source, entryOffset)
+                    while (low <= high) {
+                        val mid = (low + high) ushr 1
+                        val title = getTitleAt(mid)
+                        if (title.isEmpty()) {
+                            low = mid + 1
+                            continue
+                        }
+                        // Сравниваем case-sensitive с оригинальными строками ZIM
+                        val comp = title.compareTo(token)
+                        if (comp >= 0) {
+                            bestMatchIdx = mid
+                            high = mid - 1
+                        } else {
+                            low = mid + 1
+                        }
+                    }
+
+                    if (bestMatchIdx == -1) return
+
+                    val startIdx = maxOf(0, bestMatchIdx - 1)
+                    val scanLimit = minOf(startIdx + 600, header.articleCount)
+
+                    var nonMatchCount = 0
+
+                    for (i in startIdx until scanLimit) {
+                        if (results.size >= limit) break
+                        val entry = getEntryAt(i) ?: continue
+                        
+                        // Проверяем, начинается ли оригинальный заголовок с нашего поиск-токена
+                        if (entry.title.startsWith(token)) {
+                            // match
+                            nonMatchCount = 0
+                        } else {
+                            nonMatchCount++
+                            // Если мы прошли больше 2 элементов и они не совпадают — значит наш блок кончился
+                            if (nonMatchCount > 2 && i >= bestMatchIdx) {
+                                break
+                            }
+                            continue // пропускаем этот элемент, он не начинается с token
+                        }
+
+                        if (entry.mimeType == 0xFFFF) continue // редиректы пропускаем
 
                         val titleLower = entry.title.lowercase()
-                        if (!tokens.all { titleLower.contains(it) }) continue
-                        if (entry.mimeType == 0xFFFF) continue // пропускаем редиректы
-                        if (entry.namespace != 'A' && entry.namespace != 'a' &&
-                            entry.namespace != 'C' && entry.namespace != 'c') continue
+                        if (!lowerTokens.all { titleLower.contains(it) }) continue
+
+                        val isContent = entry.namespace == 'A' || entry.namespace == 'a' ||
+                            entry.namespace == 'C' || entry.namespace == 'c' ||
+                            entry.namespace == '\u0000' || entry.namespace == '-' || entry.namespace == ' '
+                        if (!isContent) continue
+
+                        val entryUrl = if (entry.namespace == '\u0000' || entry.namespace == ' ')
+                            entry.url
+                        else
+                            "${entry.namespace}/${entry.url}"
 
                         val id = "${archiveId}_${entry.namespace}_${entry.url}"
-                        if (id in alreadyFound) continue
-
-                        containsResults.add(ArticleEntity(
-                            id = id,
-                            archiveId = archiveId,
-                            archiveTitle = archiveTitle,
-                            url = "${entry.namespace}/${entry.url}",
-                            title = entry.title,
-                            category = if (entry.namespace == 'C' || entry.namespace == 'c') "Категория" else "Статья",
-                            excerpt = "Найдено в $archiveTitle",
-                            htmlContent = "",
-                            isFeedCandidate = false
-                        ))
+                        if (results.none { it.id == id }) {
+                            results.add(ArticleEntity(
+                                id = id,
+                                archiveId = archiveId,
+                                archiveTitle = archiveTitle,
+                                url = entryUrl,
+                                title = entry.title,
+                                category = if (entry.namespace == 'C' || entry.namespace == 'c') "Категория" else "Статья",
+                                excerpt = "Найдено в $archiveTitle",
+                                htmlContent = "",
+                                isFeedCandidate = false
+                            ))
+                        }
                     }
-                    results.addAll(containsResults)
+                }
+
+                fun scanFromUrl(prefixString: String) {
+                    var low = 0
+                    var high = header.articleCount - 1
+                    var bestMatchIdx = -1
+
+                    while (low <= high) {
+                        val mid = (low + high) ushr 1
+                        source.seek(header.urlPtrPos + mid * 8L)
+                        val entryOffset = try { readLELong(source) } catch (e: Exception) { -1L }
+                        if (entryOffset == -1L) {
+                            low = mid + 1
+                            continue
+                        }
+                        val entry = readDirectoryEntry(source, entryOffset)
+                        val entryPath = "${entry.namespace}/${entry.url}"
+                        
+                        val comp = entryPath.compareTo(prefixString)
+                        if (comp >= 0) {
+                            bestMatchIdx = mid
+                            high = mid - 1
+                        } else {
+                            low = mid + 1
+                        }
+                    }
+
+                    if (bestMatchIdx == -1) return
+
+                    val startIdx = maxOf(0, bestMatchIdx - 1)
+                    val scanLimit = minOf(startIdx + 600, header.articleCount)
+
+                    var nonMatchCount = 0
+
+                    for (i in startIdx until scanLimit) {
+                        if (results.size >= limit) break
+                        source.seek(header.urlPtrPos + i * 8L)
+                        val entryOffset = try { readLELong(source) } catch (e: Exception) { break }
+                        val entry = readDirectoryEntry(source, entryOffset)
+                        
+                        val entryPath = "${entry.namespace}/${entry.url}"
+                        val startsWithPrefix = entryPath.startsWith(prefixString, ignoreCase = true)
+                        val titleMatches = entry.title.startsWith(cleanQuery, ignoreCase = true) || 
+                                           entry.title.contains(cleanQuery, ignoreCase = true)
+
+                        if (startsWithPrefix || titleMatches) {
+                            nonMatchCount = 0
+                        } else {
+                            nonMatchCount++
+                            if (nonMatchCount > 5 && i >= bestMatchIdx) {
+                                break
+                            }
+                            continue
+                        }
+
+                        if (entry.mimeType == 0xFFFF) continue // skip redirects
+
+                        val titleLower = entry.title.lowercase()
+                        if (!lowerTokens.all { titleLower.contains(it) }) continue
+
+                        val isContent = entry.namespace == 'A' || entry.namespace == 'a' ||
+                            entry.namespace == 'C' || entry.namespace == 'c' ||
+                            entry.namespace == '\u0000' || entry.namespace == '-' || entry.namespace == ' '
+                        if (!isContent) continue
+
+                        val entryUrl = if (entry.namespace == '\u0000' || entry.namespace == ' ')
+                            entry.url
+                        else
+                            "${entry.namespace}/${entry.url}"
+
+                        val id = "${archiveId}_${entry.namespace}_${entry.url}"
+                        if (results.none { it.id == id }) {
+                            results.add(ArticleEntity(
+                                id = id,
+                                archiveId = archiveId,
+                                archiveTitle = archiveTitle,
+                                url = entryUrl,
+                                title = entry.title,
+                                category = if (entry.namespace == 'C' || entry.namespace == 'c') "Категория" else "Статья",
+                                excerpt = "Найдено в $archiveTitle",
+                                htmlContent = "",
+                                isFeedCandidate = false
+                            ))
+                        }
+                    }
+                }
+
+                val firstTokenLower = originalFirstToken.lowercase()
+                val firstTokenCap = firstTokenLower.replaceFirstChar { if (it.isLowerCase()) it.titlecase(java.util.Locale.getDefault()) else it.toString() }
+
+                // 1. Попытка поиска через titlePtrPos, если он есть
+                if (header.titlePtrPos != 0L) {
+                    try {
+                        scanFrom(firstTokenCap)
+                        if (results.size < limit && originalFirstToken != firstTokenCap) {
+                            scanFrom(originalFirstToken)
+                        }
+                        if (results.size < limit && firstTokenLower != originalFirstToken && firstTokenLower != firstTokenCap) {
+                            scanFrom(firstTokenLower)
+                        }
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                    }
+                }
+
+                // 2. Резервный поиск напрямую через таблицу URL-указателей (urlPtrPos), которая есть всегда
+                if (results.size < limit) {
+                    try {
+                        val prefixes = listOf(
+                            "A/$firstTokenCap",
+                            "A/$firstTokenLower",
+                            "C/$firstTokenCap",
+                            "a/$firstTokenCap",
+                            "c/$firstTokenCap",
+                            firstTokenCap,
+                            firstTokenLower
+                        )
+                        for (prefix in prefixes) {
+                            if (results.size >= limit) break
+                            scanFromUrl(prefix)
+                        }
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                    }
                 }
             }
         } catch (e: Throwable) {

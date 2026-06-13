@@ -619,6 +619,42 @@ fun FeedCard(
 fun SearchScreen(viewModel: MainViewModel) {
     val searchQuery by viewModel.searchQuery.collectAsStateWithLifecycle()
     val searchedArticles by viewModel.searchedArticles.collectAsStateWithLifecycle()
+    val archives by viewModel.archives.collectAsStateWithLifecycle()
+
+    if (archives.isEmpty()) {
+        Box(modifier = Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Search,
+                    contentDescription = null,
+                    modifier = Modifier.size(64.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                )
+                Text(
+                    text = "Архивы не подключены",
+                    style = MaterialTheme.typography.titleLarge,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    text = "После обновления приложения необходимо заново подключить ваши сохраненные ZIM-файлы в Настройках.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center
+                )
+                Button(
+                    onClick = { viewModel.currentTab.value = 3 },
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Text("Перейти в Настройки")
+                }
+            }
+        }
+        return
+    }
 
     Column(modifier = Modifier.fillMaxSize()) {
         TextField(
