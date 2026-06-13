@@ -670,16 +670,28 @@ object ZimReader {
         }
     }
 
-    fun searchArticlesInZim(context: Context, pathOrUri: String, query: String, archiveId: String, archiveTitle: String, limit: Int = 40): List<ArticleEntity> {
+    fun searchArticlesInZim(
+        context: Context,
+        pathOrUri: String,
+        query: String,
+        archiveId: String,
+        archiveTitle: String,
+        limit: Int = 40
+    ): List<ArticleEntity> {
         val results = ArrayList<ArticleEntity>(limit)
         val cleanQuery = query.trim().lowercase()
         if (cleanQuery.isEmpty()) return emptyList()
 
+        // Разбиваем на токены для поиска по нескольким словам
+        val tokens = cleanQuery.split("\\s+".toRegex()).filter { it.isNotEmpty() }
+        val firstToken = tokens.first()
+
         try {
             openSource(context, pathOrUri).use { source ->
                 val header = readHeader(source)
-                
-                // Binary search by TITLE-index instead of URL-index
+
+                // --- Шаг 1: бинарный поиск по title-pointer table (как в Kiwix) ---
+                // Title-pointer table хранит индексы статей, упорядоченные по title
                 var low = 0
                 var high = header.articleCount - 1
                 var bestMatchIdx = -1
@@ -693,16 +705,19 @@ object ZimReader {
                     val entry = readDirectoryEntry(source, entryOffset)
 
                     val titleLower = entry.title.lowercase()
-                    val comp = titleLower.compareTo(cleanQuery)
+                    val comp = titleLower.compareTo(firstToken)
                     when {
                         comp >= 0 -> { bestMatchIdx = mid; high = mid - 1 }
                         else -> low = mid + 1
                     }
                 }
 
-                // Scan forward from found position
+                // --- Шаг 2: сканируем вперёд от найденной позиции ---
+                // Собираем startsWith-совпадения (как Kiwix — самые релевантные)
                 val startIdx = if (bestMatchIdx != -1) bestMatchIdx else 0
-                for (i in startIdx until minOf(startIdx + 500, header.articleCount)) {
+                val scanLimit = minOf(startIdx + 500, header.articleCount)
+
+                for (i in startIdx until scanLimit) {
                     if (results.size >= limit) break
                     source.seek(header.titlePtrPos + i * 4L)
                     val articleIdx = readLEInt(source).toLong() and 0xFFFFFFFFL
@@ -710,9 +725,17 @@ object ZimReader {
                     val entryOffset = readLELong(source)
                     val entry = readDirectoryEntry(source, entryOffset)
 
-                    if (!entry.title.lowercase().startsWith(cleanQuery)) break // out of bounds
+                    val titleLower = entry.title.lowercase()
 
-                    if (entry.namespace == 'A' || entry.namespace == 'a' || entry.namespace == 'C' || entry.namespace == 'c') {
+                    // Проверяем: заголовок начинается с первого токена
+                    if (!titleLower.startsWith(firstToken)) break
+
+                    // Если несколько токенов — все должны присутствовать
+                    val matchesAllTokens = tokens.all { token -> titleLower.contains(token) }
+                    if (!matchesAllTokens) continue
+
+                    if (entry.namespace == 'A' || entry.namespace == 'a' ||
+                        entry.namespace == 'C' || entry.namespace == 'c') {
                         results.add(ArticleEntity(
                             id = "${archiveId}_${entry.namespace}_${entry.url}",
                             archiveId = archiveId,
@@ -726,11 +749,49 @@ object ZimReader {
                         ))
                     }
                 }
+
+                // --- Шаг 3: если результатов мало — ищем contains по всей таблице ---
+                // (медленнее, но находит совпадения в середине заголовка)
+                if (results.size < 5) {
+                    val containsResults = ArrayList<ArticleEntity>()
+                    val alreadyFound = results.map { it.id }.toHashSet()
+
+                    for (i in 0 until header.articleCount) {
+                        if (containsResults.size + results.size >= limit) break
+                        source.seek(header.titlePtrPos + i * 4L)
+                        val articleIdx = readLEInt(source).toLong() and 0xFFFFFFFFL
+                        source.seek(header.urlPtrPos + articleIdx * 8L)
+                        val entryOffset = readLELong(source)
+                        val entry = readDirectoryEntry(source, entryOffset)
+
+                        val titleLower = entry.title.lowercase()
+                        if (!tokens.all { titleLower.contains(it) }) continue
+                        if (entry.mimeType == 0xFFFF) continue // пропускаем редиректы
+                        if (entry.namespace != 'A' && entry.namespace != 'a' &&
+                            entry.namespace != 'C' && entry.namespace != 'c') continue
+
+                        val id = "${archiveId}_${entry.namespace}_${entry.url}"
+                        if (id in alreadyFound) continue
+
+                        containsResults.add(ArticleEntity(
+                            id = id,
+                            archiveId = archiveId,
+                            archiveTitle = archiveTitle,
+                            url = "${entry.namespace}/${entry.url}",
+                            title = entry.title,
+                            category = if (entry.namespace == 'C' || entry.namespace == 'c') "Категория" else "Статья",
+                            excerpt = "Найдено в $archiveTitle",
+                            htmlContent = "",
+                            isFeedCandidate = false
+                        ))
+                    }
+                    results.addAll(containsResults)
+                }
             }
         } catch (e: Throwable) {
             e.printStackTrace()
         }
-        
+
         return results
     }
 

@@ -33,19 +33,6 @@ data class ArticleEntity(
     val isFeedCandidate: Boolean = false
 )
 
-@Fts4(
-    tokenizer = FtsOptions.TOKENIZER_UNICODE61,
-    tokenizerArgs = ["remove_diacritics=1"]
-)
-@Entity(tableName = "articles_fts")
-data class ArticleFts(
-    val articleId: String,
-    val title: String,
-    val excerpt: String,
-    val fullText: String, // Field for searching through the entire article content
-    val archiveId: String
-)
-
 @Entity(tableName = "bookmarks")
 data class BookmarkEntity(
     @PrimaryKey val id: String, // same as article ID

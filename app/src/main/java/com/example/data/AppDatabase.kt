@@ -23,6 +23,9 @@ interface ArchiveDao {
 
     @Query("DELETE FROM archives WHERE id = :id")
     suspend fun deleteArchiveById(id: String)
+
+    @Query("SELECT * FROM archives")
+    suspend fun getAllArchivesOnce(): List<ArchiveEntity>
 }
 
 @Dao
@@ -52,22 +55,6 @@ interface ArticleDao {
     @Query("SELECT * FROM articles WHERE isFeedCandidate = 1 ORDER BY RANDOM() LIMIT :limit")
     suspend fun getRandomFeed(limit: Int): List<ArticleEntity>
 
-    @Query("""
-        SELECT * FROM articles
-        WHERE id IN (
-            SELECT articleId FROM articles_fts
-            WHERE articles_fts MATCH :query
-        )
-        ORDER BY
-          (CASE WHEN LOWER(title) = LOWER(:exactWord) THEN 0
-                WHEN LOWER(title) LIKE LOWER(:startsWithQuery) THEN 1
-                WHEN title LIKE :exactTitleQuery THEN 2
-                ELSE 3 END),
-          length(title) ASC
-        LIMIT :limit
-    """)
-    suspend fun searchArticlesFts(query: String, exactTitleQuery: String, startsWithQuery: String, exactWord: String, limit: Int = 100): List<ArticleEntity>
-
     // Advanced title search that doesn't depend on FTS (for 100% reliability with short prefixes)
     @Query("""
         SELECT * FROM articles 
@@ -88,14 +75,8 @@ interface ArticleDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertArticles(articles: List<ArticleEntity>)
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insertArticlesFts(items: List<ArticleFts>)
-
     @Query("DELETE FROM articles WHERE archiveId = :archiveId")
     suspend fun deleteArticlesByArchive(archiveId: String)
-
-    @Query("DELETE FROM articles_fts WHERE archiveId = :archiveId")
-    suspend fun deleteFtsByArchive(archiveId: String)
 }
 
 @Dao
@@ -113,7 +94,7 @@ interface BookmarkDao {
     suspend fun deleteBookmarkById(id: String)
 }
 
-@Database(entities = [ArchiveEntity::class, ArticleEntity::class, ArticleFts::class, BookmarkEntity::class], version = 6, exportSchema = false)
+@Database(entities = [ArchiveEntity::class, ArticleEntity::class, BookmarkEntity::class], version = 6, exportSchema = false)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun archiveDao(): ArchiveDao
     abstract fun articleDao(): ArticleDao

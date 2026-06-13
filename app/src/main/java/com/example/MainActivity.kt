@@ -365,85 +365,6 @@ fun ZimLiteApp(viewModel: MainViewModel) {
                 )
             }
         }
-
-        // Dim background and linear progress indexer overlay with livedata metrics
-        val isIndexing by viewModel.isIndexing.collectAsStateWithLifecycle()
-        if (isIndexing) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(Color.Black.copy(alpha = 0.6f))
-                    .clickable(
-                        interactionSource = remember { MutableInteractionSource() },
-                        indication = null,
-                        onClick = { /* Consume clicks to block background */ }
-                    ),
-                contentAlignment = Alignment.Center
-            ) {
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                    shape = RoundedCornerShape(20.dp),
-                    modifier = Modifier.padding(32.dp)
-                ) {
-                    Column(
-                        modifier = Modifier.padding(24.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        val progress by viewModel.indexingProgress.collectAsStateWithLifecycle()
-                        val total by viewModel.indexingTotal.collectAsStateWithLifecycle()
-
-                        if (total > 0) {
-                            val fraction = progress.toFloat() / total
-                            LinearProgressIndicator(
-                                progress = { fraction },
-                                color = MaterialTheme.colorScheme.primary,
-                                trackColor = MaterialTheme.colorScheme.primaryContainer,
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                            Spacer(modifier = Modifier.height(16.dp))
-                            Text(
-                                text = "Индексация: $progress / $total статей",
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 16.sp,
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Text(
-                                text = "${(fraction * 100).toInt()}%",
-                                fontSize = 14.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = MaterialTheme.colorScheme.primary
-                            )
-                        } else {
-                            CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
-                            Spacer(modifier = Modifier.height(16.dp))
-                            Text(
-                                text = "Индексация архива...",
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 18.sp,
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
-                        }
-
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text(
-                            text = "Читаем структуру архива и строим локальную базу. Большие архивы могут занять минуту.",
-                            textAlign = TextAlign.Center,
-                            fontSize = 12.sp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        
-                        Spacer(modifier = Modifier.height(12.dp))
-                        TextButton(
-                            onClick = { viewModel.cancelIndexing() },
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Text("Отменить индексацию", color = MaterialTheme.colorScheme.error)
-                        }
-                    }
-                }
-            }
-        }
     }
 }
 
@@ -505,50 +426,11 @@ fun EmptyStateScreen(onGoToSettings: () -> Unit) {
 fun FeedScreen(viewModel: MainViewModel) {
     val feedArticles by viewModel.feedArticles.collectAsStateWithLifecycle()
     val archives by viewModel.archives.collectAsStateWithLifecycle()
-    val isIndexing by viewModel.isIndexing.collectAsStateWithLifecycle()
 
     val listState = rememberLazyListState()
 
     Column(modifier = Modifier.fillMaxSize()) {
-        if (isIndexing) {
-            val progress by viewModel.indexingProgress.collectAsStateWithLifecycle()
-            val total by viewModel.indexingTotal.collectAsStateWithLifecycle()
-
-            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
-                    modifier = Modifier.padding(32.dp)
-                ) {
-                    if (total > 0) {
-                        val fraction = progress.toFloat() / total
-                        LinearProgressIndicator(
-                            progress = { fraction },
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text(
-                            text = "Индексация: $progress / $total статей",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Text(
-                            text = "${(fraction * 100).toInt()}%",
-                            style = MaterialTheme.typography.labelLarge,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.primary
-                        )
-                    } else {
-                        CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
-                        Text(
-                            text = "Индексация архива...",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
-            }
-        } else if (archives.isEmpty()) {
+        if (archives.isEmpty()) {
             Box(modifier = Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally,
@@ -1024,8 +906,6 @@ fun SettingsScreen(
 ) {
     val currentTheme by viewModel.appTheme.collectAsStateWithLifecycle()
     val useOriginalHtml by viewModel.useOriginalHtml.collectAsStateWithLifecycle()
-    val searchInContent by viewModel.searchInContent.collectAsStateWithLifecycle()
-    val deepIndexing by viewModel.deepIndexing.collectAsStateWithLifecycle()
     val customZimDirPath by viewModel.customZimDirPath.collectAsStateWithLifecycle()
     val archives by viewModel.archives.collectAsStateWithLifecycle()
 
@@ -1036,31 +916,8 @@ fun SettingsScreen(
     val downloadError by viewModel.downloadError.collectAsStateWithLifecycle()
 
     var directUrlInput by remember { mutableStateOf("") }
-    var showDeepIndexingConfirm by remember { mutableStateOf(false) }
 
     androidx.activity.compose.BackHandler(onBack = { onClose() })
-
-    if (showDeepIndexingConfirm) {
-        AlertDialog(
-            onDismissRequest = { showDeepIndexingConfirm = false },
-            title = { Text("Включить глубокий поиск?") },
-            text = { Text("Это позволит искать не только в заголовках, но и по всему тексту статей. " +
-                    "Внимание: это потребует полной переиндексации всех ваших архивов, что может занять много времени (до часа на очень больших базах). Разряжает батарею.") },
-            confirmButton = {
-                TextButton(onClick = {
-                    viewModel.setDeepIndexing(true)
-                    showDeepIndexingConfirm = false
-                }) {
-                    Text("Включить и переиндексировать", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showDeepIndexingConfirm = false }) {
-                    Text("Отмена")
-                }
-            }
-        )
-    }
 
     // Constants for Wikipedia & Wikiquote Ru nopic files
     val defaultWikiUrl = "https://download.kiwix.org/zim/wikipedia/wikipedia_ru_all_nopic_2026-01.zim"
@@ -1243,71 +1100,6 @@ fun SettingsScreen(
                     Switch(
                         checked = useOriginalHtml,
                         onCheckedChange = { viewModel.setUseOriginalHtml(it) }
-                    )
-                }
-                Spacer(modifier = Modifier.height(8.dp))
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f))
-                        .clickable { viewModel.setSearchInContent(!searchInContent) }
-                        .padding(16.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = "Поиск по содержанию",
-                            fontWeight = FontWeight.SemiBold,
-                            color = MaterialTheme.colorScheme.onSurface
-                        )
-                        Text(
-                            text = if (searchInContent) "Искать в заголовках и внутри статей (FTS)" else "Искать только в заголовках",
-                            fontSize = 12.sp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    Switch(
-                        checked = searchInContent,
-                        onCheckedChange = { viewModel.setSearchInContent(it) }
-                    )
-                }
-                Spacer(modifier = Modifier.height(8.dp))
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f))
-                        .clickable { 
-                            if (!deepIndexing) {
-                                showDeepIndexingConfirm = true
-                            } else {
-                                viewModel.setDeepIndexing(false)
-                            }
-                        }
-                        .padding(16.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = "Глубокий поиск (Контент)",
-                            fontWeight = FontWeight.SemiBold,
-                            color = MaterialTheme.colorScheme.onSurface
-                        )
-                        Text(
-                            text = if (deepIndexing) "Включено (извлекаются отрывки и весь текст)" else "Выключено (только заголовки)",
-                            fontSize = 12.sp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    Switch(
-                        checked = deepIndexing,
-                        onCheckedChange = { 
-                            if (it) showDeepIndexingConfirm = true 
-                            else viewModel.setDeepIndexing(false) 
-                        }
                     )
                 }
             }
